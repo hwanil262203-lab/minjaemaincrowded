@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>위험지대 감지 + 진동 알림</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        background: #0b1020;
+        color: #e8ecf1;
+      }
+      header {
+        padding: 12px 16px;
+        background: #0d1328;
+        border-bottom: 1px solid #1b254b;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 18px;
+      }
+      main {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        padding: 16px;
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+      .content {
+        display: grid;
+        grid-template-columns: 640px 1fr;
+        gap: 16px;
+      }
+      @media (max-width: 1024px) {
+        .content {
+          grid-template-columns: 1fr;
+        }
+      }
+      #stage {
+        position: relative;
+        background: #0d1328;
+        border: 1px solid #1b254b;
+        border-radius: 8px;
+        overflow: hidden;
+        max-width: 640px;
+      }
+      video {
+        width: 100%;
+        height: auto;
+        display: block;
+        max-width: 640px;
+      }
+      canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
+      .sidebar {
+        background: #0d1328;
+        border: 1px solid #1b254b;
+        border-radius: 8px;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .row label {
+        min-width: 120px;
+        font-size: 13px;
+        color: #b7c2d7;
+      }
+      input[type="number"] {
+        flex: 1;
+        min-width: 80px;
+        background: #0b1020;
+        border: 1px solid #1b254b;
+        color: #e8ecf1;
+        padding: 6px 8px;
+        border-radius: 6px;
+      }
+      button {
+        background: #3356ff;
+        color: white;
+        border: none;
+        padding: 8px 12px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      button.secondary {
+        background: #192240;
+        border: 1px solid #2a3a78;
+      }
+      button.big {
+        padding: 14px 20px;
+        font-size: 18px;
+        width: 100%;
+      }
+      .log {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        background: #070a18;
+        border: 1px solid #1b254b;
+        border-radius: 6px;
+        padding: 8px;
+        height: 120px;
+        overflow: auto;
+        font-size: 11px;
+        white-space: pre-wrap;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: #0b1020;
+        border: 1px solid #1b254b;
+        color: #b7c2d7;
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+      }
+      #predictions {
+        background: #0d1328;
+        border: 1px solid #1b254b;
+        border-radius: 8px;
+        padding: 16px;
+      }
+      #predictions h3 {
+        margin: 0 0 12px 0;
+        font-size: 14px;
+        color: #b7c2d7;
+      }
+      #detections {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 13px;
+      }
+      #detections li {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 6px;
+        background: #0b1020;
+        border: 1px solid #1b254b;
+      }
+      #detections li.danger {
+        border-color: #ef4444;
+        background: rgba(239, 68, 68, 0.12);
+      }
+      #detections li.muted {
+        color: #6b7a99;
+      }
+      #detections .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .hint {
+        background: #192240;
+        border: 1px solid #2a3a78;
+        padding: 8px;
+        border-radius: 6px;
+        font-size: 12px;
+      }
+
+      /* ---------- 상태 인디케이터 (드래그 가능) ----------
+         ok     : 초록 원 + ✓  정상 작동
+         warn   : 노랑 세모 + ! 비정상 (모델/카메라/감지 루프 멈춤)
+         danger : 빨강 원 + !  위험 감지                                     */
+      #floatingIndicator {
+        position: fixed;
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        background: #22c55e;
+        border: 3px solid #ffffff;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), 0 0 20px rgba(34, 197, 94, 0.6);
+        z-index: 9999;
+        cursor: move;
+        transition: background 0.3s ease, box-shadow 0.3s ease, border-radius 0.3s ease;
+        top: 20px;
+        right: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        font-weight: bold;
+        color: #fff;
+        user-select: none;
+        -webkit-user-select: none;
+        touch-action: none;
+      }
+      #floatingIndicator.warn {
+        background: #facc15;
+        color: #1a1a00;
+        border-radius: 12px;
+        clip-path: polygon(50% 4%, 97% 92%, 3% 92%);
+        border: none;
+        box-shadow: 0 0 20px rgba(250, 204, 21, 0.8);
+        padding-top: 10px;
+        box-sizing: border-box;
+      }
+      #floatingIndicator.danger {
+        background: #ef4444;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), 0 0 20px rgba(239, 68, 68, 0.8);
+        animation: indicatorPulse 0.8s ease-in-out infinite;
+      }
+      #floatingIndicator.dragging {
+        opacity: 0.8;
+        cursor: grabbing;
+      }
+      @keyframes indicatorPulse {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.18); }
+      }
+
+      /* ---------- 화면 깜빡임 (진동 모드 대비) ---------- */
+      #flashOverlay {
+        position: fixed;
+        inset: 0;
+        background: #ef4444;
+        opacity: 0;
+        pointer-events: none;
+        z-index: 9000;
+      }
+      #flashOverlay.active {
+        animation: screenFlash 0.9s ease-in-out infinite;
+      }
+      @keyframes screenFlash {
+        0%, 100% { opacity: 0; }
+        50% { opacity: var(--flash-opacity, 0.3); }
+      }
+
+      /* ---------- 시작 안내 / 설정 창 ---------- */
+      .modal {
+        position: fixed;
+        inset: 0;
+        background: rgba(5, 8, 20, 0.92);
+        z-index: 9500;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        box-sizing: border-box;
+      }
+      .modal[hidden] {
+        display: none;
+      }
+      .modal .card {
+        background: #0d1328;
+        border: 1px solid #2a3a78;
+        border-radius: 12px;
+        padding: 20px;
+        width: 100%;
+        max-width: 440px;
+        max-height: 92vh;
+        overflow: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .modal h2 {
+        margin: 0;
+        font-size: 20px;
+      }
+      .modal h3 {
+        margin: 8px 0 0 0;
+        font-size: 14px;
+        color: #b7c2d7;
+      }
+      .modal p {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .notice {
+        background: rgba(250, 204, 21, 0.12);
+        border: 1px solid rgba(250, 204, 21, 0.5);
+        border-radius: 8px;
+        padding: 10px;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .choice {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .choice label {
+        flex: 1;
+        min-width: 80px;
+        text-align: center;
+        background: #0b1020;
+        border: 1px solid #1b254b;
+        border-radius: 8px;
+        padding: 10px 8px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      .choice input {
+        display: none;
+      }
+      .choice input:checked + span {
+        color: #fff;
+        font-weight: bold;
+      }
+      .choice label:has(input:checked) {
+        border-color: #3356ff;
+        background: #192240;
+      }
+      .toggle {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        font-size: 15px;
+        background: #0b1020;
+        border: 1px solid #1b254b;
+        border-radius: 8px;
+        padding: 10px 12px;
+      }
+      .toggle input {
+        width: 22px;
+        height: 22px;
+      }
+      .compact-only,
+      .first-only {
+        display: none;
+      }
+      .modal.compact .compact-only {
+        display: block;
+      }
+      .modal.first .first-only {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="flashOverlay"></div>
+    <div id="floatingIndicator" class="warn" title="초기화 중 (드래그하여 이동 가능)">!</div>
+
+    <!-- 시작 안내 창 -->
+    <div id="startOverlay" class="modal first">
+      <div class="card">
+        <h2>🚶 위험지대 감지 시작</h2>
+        <div class="notice">
+          📳 <b>스마트폰이 무음 모드라면 진동 모드로 바꿔 주세요.</b><br />
+          무음 모드에서는 위험 알림 진동이 울리지 않을 수 있습니다. 웹에서는 모드를 대신 바꿔 드릴 수 없습니다.
+        </div>
+        <p id="noVibrateNote" class="notice" hidden>
+          ⚠ 이 기기(브라우저)는 진동을 지원하지 않습니다. 화면 깜빡임으로 알려 드립니다.
+        </p>
+        <div class="first-only">
+          <h3>화면 깜빡임 알림</h3>
+          <p>위험이 감지되어 진동이 울리는 동안 화면이 <b>연한 붉은빛으로 깜빡입니다</b>. 진동을 느끼기 어려운 상황을 대비한 기능이며, 설정에서 언제든 바꿀 수 있습니다.</p>
+        </div>
+        <label class="toggle">
+          <span>화면 깜빡임 사용</span>
+          <input id="startFlashToggle" type="checkbox" checked />
+        </label>
+        <button id="btnStartApp" class="big">▶ 시작하기</button>
+        <p class="compact-only" style="font-size: 12px; color: #6b7a99;">설정은 오른쪽 위 ⚙ 버튼에서 바꿀 수 있습니다.</p>
+      </div>
+    </div>
+
+    <!-- 설정 창 -->
+    <div id="settingsPanel" class="modal" hidden>
+      <div class="card">
+        <h2>⚙ 설정</h2>
+
+        <h3>진동 세기</h3>
+        <p style="font-size: 12px; color: #6b7a99;">웹 진동은 강도 조절이 되지 않아 진동 길이와 반복 간격으로 세기를 흉내 냅니다.</p>
+        <div class="choice" id="vibStrengthChoice">
+          <label><input type="radio" name="vibStrength" value="weak" /><span>약</span></label>
+          <label><input type="radio" name="vibStrength" value="mid" checked /><span>중</span></label>
+          <label><input type="radio" name="vibStrength" value="strong" /><span>강</span></label>
+        </div>
+        <div class="row">
+          <button id="btnVibTest" class="secondary">📳 진동 테스트</button>
+        </div>
+
+        <h3>화면 깜빡임</h3>
+        <label class="toggle">
+          <span>위험 알림 중 화면 깜빡임</span>
+          <input id="flashToggle" type="checkbox" checked />
+        </label>
+        <div class="choice" id="flashLevelChoice">
+          <label><input type="radio" name="flashLevel" value="light" checked /><span>연하게</span></label>
+          <label><input type="radio" name="flashLevel" value="mid" /><span>보통</span></label>
+          <label><input type="radio" name="flashLevel" value="strong" /><span>진하게</span></label>
+        </div>
+        <div class="row">
+          <button id="btnFlashTest" class="secondary">✨ 깜빡임 테스트 (2초)</button>
+        </div>
+
+        <h3>고급 (감지 민감도)</h3>
+        <div class="row">
+          <label>신뢰도 임계치</label>
+          <input id="threshold" type="number" min="0" max="1" step="0.05" value="0.25" />
+        </div>
+        <div class="row">
+          <label>근접 임계치</label>
+          <input id="proximity" type="number" min="0" max="1" step="0.05" value="0.20" title="박스 높이 ÷ 화면 높이. 이 값 이상이어야 위험으로 판단" />
+        </div>
+        <div class="row">
+          <label>확정 프레임</label>
+          <input id="steadyFrames" type="number" min="1" max="30" step="1" value="3" />
+        </div>
+
+        <button id="btnSettingsClose" class="big">닫기</button>
+      </div>
+    </div>
+
+    <header>
+      <h1>위험지대 감지 + 진동 알림 <span style="font-size: 12px; color: #4ade80; font-weight: normal;">🤖 YOLO 객체 감지</span></h1>
+      <button id="btnSettings" class="secondary" title="설정">⚙ 설정</button>
+    </header>
+    <main>
+      <div class="content">
+        <section id="stage">
+          <video id="video" autoplay playsinline muted></video>
+          <canvas id="overlay"></canvas>
+        </section>
+        <aside class="sidebar">
+          <div class="hint">💡 진동 패턴: 왼쪽 1회 · 정면 2회 · 오른쪽 3회, 가까우면 짧고 빠르게. 오른쪽 위 동그라미: 초록 ✓ 정상 · 노랑 ! 비정상 · 빨강 ! 위험</div>
+          <div class="row">
+            <button id="btnCamera">📷 카메라 시작</button>
+          </div>
+          <div class="row">
+            <button id="btnStart">▶️ 감지 시작</button>
+            <button id="btnStop" class="secondary">⏹️ 정지</button>
+          </div>
+          <div class="row">
+            <div class="badge" id="status">초기화 중...</div>
+            <div class="badge" id="engine">엔진: -</div>
+          </div>
+          <div class="log" id="log"></div>
+        </aside>
+      </div>
+
+      <section id="predictions">
+        <h3>📊 실시간 감지 결과 (위험도 순)</h3>
+        <ul id="detections"><li class="muted">대기 중</li></ul>
+      </section>
+    </main>
+
+    <!-- ONNX Runtime Web (WebGPU + WASM) -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.min.js"></script>
+    <script src="main.js"></script>
+  </body>
+</html>

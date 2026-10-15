@@ -1,0 +1,43 @@
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node/JS tooling (if added later)
+node_modules/
+dist/
+.tmp/
+
+# Editor / local tooling
+.claude/settings.local.json
+.vscode/
+*.code-workspace
+.idea/
+
+# Arduino build
+*.hex
+*.elf
+*.eep
+*.map
+build/
+# (주의: *.bin 은 제외하지 않음 — TF.js 모델 가중치 weights.bin 이 필요함)
+
+# Env
+.env
+.env.*
+
+# Archives
+*.tgz
+*.zip
+
+
+# 학습 데이터 (로컬 병합 결과)
+datasets/
+
+# 학습 산출물 best.onnx 는 커밋 대상 (시험용 yolov10n.onnx 도 포함)
