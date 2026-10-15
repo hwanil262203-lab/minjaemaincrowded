@@ -355,7 +355,81 @@
       .modal.first .first-only {
         display: block;
       }
+      /* ---------- 길찾기 ---------- */
+      #nav {
+        background: #0d1328;
+        border: 1px solid #1b254b;
+        border-radius: 8px;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      #nav h3 {
+        margin: 0;
+        font-size: 14px;
+        color: #b7c2d7;
+      }
+      #nav input[type="text"] {
+        flex: 1;
+        min-width: 160px;
+        background: #0b1020;
+        border: 1px solid #1b254b;
+        color: #e8ecf1;
+        padding: 8px 10px;
+        border-radius: 6px;
+        font-size: 14px;
+      }
+      #geoResults {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      #geoResults li {
+        padding: 8px 10px;
+        border-radius: 6px;
+        background: #0b1020;
+        border: 1px solid #1b254b;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      #geoResults li:hover {
+        border-color: #3356ff;
+      }
+      #map {
+        height: 320px;
+        border-radius: 8px;
+        border: 1px solid #1b254b;
+        background: #070a18;
+      }
+      #navStatus {
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      #navStatus b {
+        color: #4ade80;
+      }
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: #192240;
+        border: 1px solid #2a3a78;
+        font-size: 12px;
+        margin-right: 4px;
+      }
+      #detections li .gps {
+        font-size: 11px;
+        color: #facc15;
+        border: 1px solid #facc15;
+        border-radius: 4px;
+        padding: 0 4px;
+      }
     </style>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" crossorigin="anonymous" />
   </head>
   <body>
     <div id="flashOverlay"></div>
@@ -369,6 +443,9 @@
           📳 <b>스마트폰이 무음 모드라면 진동 모드로 바꿔 주세요.</b><br />
           무음 모드에서는 위험 알림 진동이 울리지 않을 수 있습니다. 웹에서는 모드를 대신 바꿔 드릴 수 없습니다.
         </div>
+        <p class="notice" style="background: rgba(51, 86, 255, 0.12); border-color: rgba(51, 86, 255, 0.5);">
+          📍 시작하면 <b>위치 권한</b>을 요청합니다. 위치는 횡단보도·계단·기둥이 가까운지 판단하고 도보 경로를 안내하는 데만 쓰이며, 기기 밖으로 전송하지 않습니다.
+        </p>
         <p id="noVibrateNote" class="notice" hidden>
           ⚠ 이 기기(브라우저)는 진동을 지원하지 않습니다. 화면 깜빡임으로 알려 드립니다.
         </p>
@@ -414,6 +491,20 @@
         <div class="row">
           <button id="btnFlashTest" class="secondary">✨ 깜빡임 테스트 (2초)</button>
         </div>
+
+        <h3>위치 · 경로</h3>
+        <label class="toggle">
+          <span>GPS 위험 보조 (지도 데이터로 횡단보도·계단·기둥 예측)</span>
+          <input id="gpsAssistToggle" type="checkbox" checked />
+        </label>
+        <label class="toggle">
+          <span>도보 경로 안내 사용</span>
+          <input id="navToggle" type="checkbox" checked />
+        </label>
+        <label class="toggle">
+          <span>음성 안내 (경로 회전 지점)</span>
+          <input id="voiceToggle" type="checkbox" checked />
+        </label>
 
         <h3>고급 (감지 민감도)</h3>
         <div class="row">
@@ -464,10 +555,31 @@
         <h3>📊 실시간 감지 결과 (위험도 순)</h3>
         <ul id="detections"><li class="muted">대기 중</li></ul>
       </section>
+
+      <section id="nav">
+        <h3>🧭 도보 경로 안내</h3>
+        <div class="row">
+          <input id="destInput" type="text" placeholder="도착지 (예: 서울역, 환일고등학교)" />
+          <button id="btnGeocode">🔍 검색</button>
+        </div>
+        <ul id="geoResults"></ul>
+        <div class="row">
+          <button id="btnNavStart" disabled>▶ 안내 시작</button>
+          <button id="btnNavStop" class="secondary">⏹ 안내 중지</button>
+          <button id="btnSimWalk" class="secondary" title="테스트용: 경로를 따라 자동 이동">🚶 시뮬레이션</button>
+        </div>
+        <div id="navStatus" class="muted">위치 확인 중...</div>
+        <div id="map"></div>
+        <div style="font-size: 11px; color: #6b7a99;">지도·경로·위험물 데이터 © OpenStreetMap 기여자 · 경로: OSRM(FOSSGIS) · 인파 지표는 상점·역 밀집도로 추정</div>
+      </section>
     </main>
 
     <!-- ONNX Runtime Web (WebGPU + WASM) -->
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.min.js"></script>
+    <!-- 지도 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" crossorigin="anonymous"></script>
+    <script src="geo.js"></script>
+    <script src="route.js"></script>
     <script src="main.js"></script>
   </body>
 </html>

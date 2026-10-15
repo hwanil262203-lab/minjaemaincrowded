@@ -17,6 +17,10 @@ const CONFIG = {
   nmsIou: 0.45,
   maxDraw: 8,
   vibrateRepeatMs: 1500, // 위험이 계속되면 이 간격으로 진동을 다시 울림
+  // GPS 보조: 지도상 위험물이 진행 방향 앞에 있으면
+  gpsLowConf: 0.1,                 // 그 클래스는 이 낮은 신뢰도까지 감지로 인정
+  gpsExpectDist: 35,               // 이 거리(m) 안이면 '예상됨'
+  gpsAlertDist: { crosswalk: 15, stairs: 10, pole: 6 }, // 이 거리 안이면 모델이 못 봐도 경고
 };
 
 // 클래스별 한국어 이름, 위험 가중치(0~1), 색. 키는 labels.json 의 영어 이름.
@@ -379,6 +383,9 @@ const settings = {
   flash: true, // 위험 알림 중 화면 깜빡임
   flashLevel: 'light', // light | mid | strong
   onboarded: false, // 첫 접속 안내를 봤는지
+  gpsAssist: true, // 지도 데이터로 위험물 예측
+  navEnabled: true, // 도보 경로 안내
+  voice: true, // 음성 안내
 };
 
 function loadSettings() {
@@ -486,8 +493,10 @@ function drawDetections(ctx, dets, best) {
     const isBest = det === best;
     ctx.lineWidth = isBest ? 4 : 2;
     ctx.strokeStyle = det.color;
+    ctx.setLineDash(det.source === 'gps' ? [10, 6] : []);
     ctx.strokeRect(det.x1, det.y1, det.x2 - det.x1, det.y2 - det.y1);
-    const text = `${det.ko} ${(det.score * 100).toFixed(0)}%`;
+    ctx.setLineDash([]);
+    const text = det.source === 'gps' ? `${det.ko} GPS ${Math.round(det.gpsDist)}m` : `${det.ko} ${(det.score * 100).toFixed(0)}%${det.gpsBoost ? ' +GPS' : ''}`;
     const tw = ctx.measureText(text).width + 8;
     ctx.fillStyle = det.color;
     ctx.fillRect(det.x1, Math.max(0, det.y1 - 18), tw, 18);
@@ -515,7 +524,7 @@ function updateDetectionList(dets, best) {
     .map((d) => {
       const cls = d === best ? 'danger' : '';
       return `<li class="${cls}"><span class="dot" style="background:${d.color}"></span>` +
-        `<b>${d.ko}</b> ${(d.score * 100).toFixed(0)}% · ${DIR_KO[d.dir]} · 근접 ${(d.prox * 100).toFixed(0)}%</li>`;
+        `<b>${d.ko}</b> ${d.source === 'gps' ? `<span class="gps">GPS ${Math.round(d.gpsDist)}m</span>` : `${(d.score * 100).toFixed(0)}%${d.gpsBoost ? ' <span class="gps">+GPS</span>' : ''}`} · ${DIR_KO[d.dir]} · 근접 ${(d.prox * 100).toFixed(0)}%</li>`;
     })
     .join('');
 }
@@ -588,7 +597,7 @@ async function inferenceLoop() {
 
         const lb = preprocess(src, inputSize);
         const result = await session.run({ [inputName]: lb.tensor });
-        const dets = postprocess(result[outputName], lb, conf, vw, vh);
+        const dets = detectWithGps(result[outputName], lb, conf, vw, vh);
         const best = assess(dets, vw, vh, minProximity);
         const confirmed = updateHysteresis(best ? best.label : null, requiredFrames);
 
@@ -692,6 +701,9 @@ function syncSettingsUI() {
   document.querySelectorAll('input[name="flashLevel"]').forEach((r) => (r.checked = r.value === settings.flashLevel));
   document.getElementById('flashToggle').checked = settings.flash;
   document.getElementById('startFlashToggle').checked = settings.flash;
+  document.getElementById('gpsAssistToggle').checked = settings.gpsAssist;
+  document.getElementById('navToggle').checked = settings.navEnabled;
+  document.getElementById('voiceToggle').checked = settings.voice;
 }
 
 function bindSettingsUI() {
@@ -715,6 +727,22 @@ function bindSettingsUI() {
     settings.flash = e.target.checked;
     saveSettings();
     if (!settings.flash) setFlash(false);
+  });
+  document.getElementById('gpsAssistToggle').addEventListener('change', (e) => {
+    settings.gpsAssist = e.target.checked;
+    saveSettings();
+    if (settings.gpsAssist && !Geo.state.pos) startGeo();
+  });
+  document.getElementById('navToggle').addEventListener('change', (e) => {
+    settings.navEnabled = e.target.checked;
+    saveSettings();
+    document.getElementById('nav').hidden = !settings.navEnabled;
+    if (!settings.navEnabled) Route.stopNav();
+    if (settings.navEnabled && !Geo.state.pos) startGeo();
+  });
+  document.getElementById('voiceToggle').addEventListener('change', (e) => {
+    settings.voice = e.target.checked;
+    saveSettings();
   });
   document.getElementById('btnVibTest').addEventListener('click', () => {
     if (!testVibration()) log('진동을 지원하지 않거나 차단된 기기입니다.');
@@ -748,6 +776,13 @@ async function startApp() {
   saveSettings();
   panels.start.hidden = true;
 
+  // 위치·나침반 (사용자 탭 안에서 요청해야 권한 창이 뜬다)
+  document.getElementById('nav').hidden = !settings.navEnabled;
+  if (settings.gpsAssist || settings.navEnabled) {
+    Geo.enableCompass();
+    startGeo();
+  }
+
   const imageUrl = new URLSearchParams(location.search).get('image');
   if (imageUrl) {
     if (!testImage) await loadTestImage(imageUrl);
@@ -778,3 +813,231 @@ window.addEventListener('load', async () => {
   showStartOverlay();
   await loadModel();
 });
+
+
+// ============================================
+// GPS 보조 감지: 지도상 위험물이 앞에 있으면 낮은 신뢰도도 인정 + 모델이 못 봐도 경고
+// ============================================
+const GPS_KO = { crosswalk: '횡단보도', stairs: '계단', pole: '기둥·가로등' };
+
+function detectWithGps(output, lb, conf, vw, vh) {
+  if (!settings.gpsAssist || !Geo.state.pos) return postprocess(output, lb, conf, vw, vh);
+
+  const ahead = Geo.hazardsAhead({ maxDist: CONFIG.gpsExpectDist });
+  const expected = new Set(ahead.map((h) => h.type));
+  const low = Math.min(conf, CONFIG.gpsLowConf);
+  const dets = postprocess(output, lb, low, vw, vh).filter((d) => {
+    if (d.score >= conf) return true;
+    if (expected.has(d.label)) { d.gpsBoost = true; return true; }
+    return false;
+  });
+
+  // 모델이 전혀 못 봤지만 지도상 아주 가까운 위험물 → 가상 박스로 경고
+  for (const h of ahead) {
+    const limit = CONFIG.gpsAlertDist[h.type];
+    if (limit == null || h.dist > limit) continue;
+    if (dets.some((d) => d.label === h.type)) continue;
+    const near = 1 - h.dist / limit; // 0(멀다) ~ 1(코앞)
+    const bw = vw / 3;
+    const x1 = h.dir === 'left' ? 0 : h.dir === 'right' ? vw - bw : (vw - bw) / 2;
+    const bh = vh * (0.3 + 0.5 * near);
+    dets.push({ label: h.type, score: 0.5 + 0.4 * near, x1, y1: vh - bh, x2: x1 + bw, y2: vh, source: 'gps', gpsDist: h.dist });
+  }
+  return dets;
+}
+
+// ============================================
+// 위치 시작 + 길찾기 UI
+// ============================================
+const navUI = {
+  input: document.getElementById('destInput'),
+  btnGeocode: document.getElementById('btnGeocode'),
+  results: document.getElementById('geoResults'),
+  btnStart: document.getElementById('btnNavStart'),
+  btnStop: document.getElementById('btnNavStop'),
+  btnSim: document.getElementById('btnSimWalk'),
+  status: document.getElementById('navStatus'),
+  mapEl: document.getElementById('map'),
+};
+let geoStarted = false;
+let selectedDest = null;
+let wakeLock = null;
+const mapState = { map: null, me: null, dest: null, line: null, hazardLayer: null, altLines: [] };
+
+function startGeo() {
+  if (geoStarted) return;
+  geoStarted = true;
+  Geo.start()
+    .then((src) => {
+      log(`✓ 위치 사용 시작 (${src === 'fake' ? '테스트 좌표' : 'GPS'})`);
+      ensureMap();
+    })
+    .catch((e) => {
+      geoStarted = false;
+      log(`✗ 위치 오류: ${e.message}`);
+      navUI.status.textContent = `위치를 사용할 수 없습니다: ${e.message}`;
+    });
+}
+
+function ensureMap() {
+  if (mapState.map || typeof L === 'undefined' || !navUI.mapEl || navUI.mapEl.offsetParent === null && document.getElementById('nav').hidden) return;
+  const p = Geo.state.pos || { lat: 37.5665, lon: 126.978 };
+  mapState.map = L.map(navUI.mapEl, { zoomControl: true }).setView([p.lat, p.lon], 16);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(mapState.map);
+  mapState.me = L.circleMarker([p.lat, p.lon], { radius: 8, color: '#3356ff', fillColor: '#3356ff', fillOpacity: 0.9 }).addTo(mapState.map);
+  mapState.hazardLayer = L.layerGroup().addTo(mapState.map);
+  renderHazards();
+}
+
+const HZ_COLOR = { crosswalk: '#facc15', stairs: '#f97316', pole: '#ef4444' };
+function renderHazards() {
+  if (!mapState.hazardLayer) return;
+  mapState.hazardLayer.clearLayers();
+  for (const h of Geo.state.hazards) {
+    L.circleMarker([h.lat, h.lon], { radius: 4, color: HZ_COLOR[h.type], fillColor: HZ_COLOR[h.type], fillOpacity: 0.8, weight: 1 })
+      .bindTooltip(`${GPS_KO[h.type]}`)
+      .addTo(mapState.hazardLayer);
+  }
+}
+
+function fmtDist(m) {
+  return m >= 1000 ? `${(m / 1000).toFixed(1)}km` : `${Math.round(m)}m`;
+}
+
+function renderNavStatus() {
+  const pos = Geo.state.pos;
+  const parts = [];
+  if (pos) {
+    parts.push(`<span class="pill">📍 ${pos.lat.toFixed(5)}, ${pos.lon.toFixed(5)} (±${Math.round(pos.accuracy)}m)</span>`);
+    parts.push(`<span class="pill">방향 ${Geo.state.heading == null ? '-' : Math.round(Geo.state.heading) + '° (' + Geo.state.headingSrc + ')'}</span>`);
+    parts.push(`<span class="pill">주변 위험물 ${Geo.state.hazards.length}곳</span>`);
+    const ahead = Geo.hazardsAhead({ maxDist: CONFIG.gpsExpectDist });
+    if (ahead.length) parts.push(`<span class="pill" style="border-color:#facc15">앞 ${ahead.slice(0, 3).map((h) => `${GPS_KO[h.type]} ${Math.round(h.dist)}m ${DIR_KO[h.dir]}`).join(' · ')}</span>`);
+  } else {
+    parts.push('위치 확인 중...');
+  }
+  const r = Route.state.chosen;
+  if (r && Route.state.active) {
+    const pr = Route.state.lastProgress;
+    const sc = r.score || {};
+    parts.push(`<div style="margin-top:6px">경로 <b>${fmtDist(r.distance)}</b> · 약 ${Math.round(r.duration / 60)}분 · 횡단보도 ${sc.cw ?? '-'}곳 · 계단 ${sc.st ?? '-'}곳 · 인파 지표 ${sc.crowdPerKm ?? '-'}/km (대안 ${Route.state.routes.length}개 중 선택)</div>`);
+    if (pr) {
+      parts.push(`<div>남은 거리 <b>${fmtDist(pr.remaining)}</b>${pr.offRoute > 30 ? ' · <span style="color:#f97316">경로 이탈 중</span>' : ''}</div>`);
+      if (pr.next) parts.push(`<div>다음: ${pr.next.text}</div>`);
+    }
+  } else if (Route.state.lastProgress && Route.state.lastProgress.arrived) {
+    parts.push('<div style="margin-top:6px"><b>목적지에 도착했습니다.</b></div>');
+  }
+  navUI.status.innerHTML = parts.join(' ');
+}
+
+function renderRoute() {
+  if (!mapState.map) return;
+  for (const l of mapState.altLines) mapState.map.removeLayer(l);
+  mapState.altLines = [];
+  if (mapState.line) { mapState.map.removeLayer(mapState.line); mapState.line = null; }
+  if (mapState.dest) { mapState.map.removeLayer(mapState.dest); mapState.dest = null; }
+  const r = Route.state.chosen;
+  if (!r) return;
+  for (const alt of Route.state.routes.slice(1)) {
+    mapState.altLines.push(L.polyline(alt.coords.map((c) => [c.lat, c.lon]), { color: '#6b7a99', weight: 3, dashArray: '6 6', opacity: 0.7 }).addTo(mapState.map));
+  }
+  mapState.line = L.polyline(r.coords.map((c) => [c.lat, c.lon]), { color: '#22c55e', weight: 5 }).addTo(mapState.map);
+  mapState.dest = L.marker([Route.state.dest.lat, Route.state.dest.lon]).addTo(mapState.map);
+  mapState.map.fitBounds(mapState.line.getBounds(), { padding: [20, 20] });
+}
+
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator && !wakeLock) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+      log('화면 꺼짐 방지 켜짐 (경로 안내 중)');
+    }
+  } catch (e) {
+    log(`화면 꺼짐 방지 실패: ${e.message}`);
+  }
+}
+
+if (navUI.btnGeocode) {
+  navUI.btnGeocode.addEventListener('click', async () => {
+    const q = navUI.input.value.trim();
+    if (!q) return;
+    navUI.results.innerHTML = '<li class="muted">검색 중...</li>';
+    try {
+      const res = await Route.geocode(q);
+      if (!res.length) { navUI.results.innerHTML = '<li class="muted">결과 없음</li>'; return; }
+      navUI.results.innerHTML = res.map((r, i) => `<li data-i="${i}">${r.name}</li>`).join('');
+      navUI.results.querySelectorAll('li').forEach((li) => li.addEventListener('click', () => {
+        selectedDest = res[parseInt(li.dataset.i, 10)];
+        navUI.results.querySelectorAll('li').forEach((x) => (x.style.borderColor = ''));
+        li.style.borderColor = '#22c55e';
+        navUI.btnStart.disabled = false;
+        log(`도착지 선택: ${selectedDest.name}`);
+      }));
+    } catch (e) {
+      navUI.results.innerHTML = `<li class="muted">검색 실패: ${e.message}</li>`;
+    }
+  });
+  navUI.input.addEventListener('keydown', (e) => { if (e.key === 'Enter') navUI.btnGeocode.click(); });
+
+  navUI.btnStart.addEventListener('click', async () => {
+    if (!selectedDest) return;
+    if (!Geo.state.pos) { log('✗ 현재 위치를 아직 모릅니다'); startGeo(); return; }
+    navUI.status.textContent = '경로 탐색 중... (대안 경로와 위험물·인파 데이터 비교)';
+    try {
+      await Route.plan(Geo.state.pos, selectedDest, { considerHazards: true });
+      const r = Route.state.chosen;
+      log(`✓ 경로 ${fmtDist(r.distance)} · ${Math.round(r.duration / 60)}분 · 점수 ${Math.round(r.score.total)} (대안 ${Route.state.routes.length}개)`);
+      ensureMap();
+      renderRoute();
+      renderNavStatus();
+      requestWakeLock();
+      if (settings.voice) Route.speak(`경로 안내를 시작합니다. ${fmtDist(r.distance)}, 약 ${Math.round(r.duration / 60)}분`);
+    } catch (e) {
+      log(`✗ 경로 탐색 실패: ${e.message}`);
+      navUI.status.textContent = `경로 탐색 실패: ${e.message}`;
+    }
+  });
+  navUI.btnStop.addEventListener('click', () => {
+    Route.stopSimulation();
+    Route.stopNav();
+    renderRoute();
+    renderNavStatus();
+    if (wakeLock) { wakeLock.release(); wakeLock = null; }
+    log('경로 안내 중지');
+  });
+  navUI.btnSim.addEventListener('click', () => {
+    if (!Route.state.active) { log('먼저 경로 안내를 시작하세요'); return; }
+    Route.simulateWalk(5, 400);
+    log('시뮬레이션: 경로를 따라 이동 (초당 약 12m, 실제 걸음의 약 8배)');
+  });
+}
+
+Geo.onChange(() => {
+  if (mapState.map && Geo.state.pos) {
+    mapState.me.setLatLng([Geo.state.pos.lat, Geo.state.pos.lon]);
+    renderHazards();
+  }
+  if (Route.state.active) Route.update(Geo.state.pos);
+  renderNavStatus();
+});
+
+Route.on((type, payload) => {
+  if (type === 'say') {
+    log(`🔊 ${payload}`);
+    if (settings.voice) Route.speak(payload);
+  } else if (type === 'rerouted') {
+    log(`↻ 경로 재탐색: ${fmtDist(payload.distance)}`);
+    renderRoute();
+  } else if (type === 'arrived') {
+    renderRoute();
+    if (wakeLock) { wakeLock.release(); wakeLock = null; }
+  } else if (type === 'error') {
+    log(`✗ 경로 오류: ${payload.message}`);
+  }
+});
+
+// 디버그용으로 콘솔에서 접근
+window.Geo = Geo;
+window.Route = Route;
