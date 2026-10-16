@@ -503,6 +503,10 @@
 
         <h3>위치 · 경로</h3>
         <label class="toggle">
+          <span>전방 막힘 감지 (거리 추정 AI, 1초에 1회 · 벽·닫힌 문·막다른 길)</span>
+          <input id="depthToggle" type="checkbox" checked />
+        </label>
+        <label class="toggle">
           <span>GPS 위험 보조 (지도 데이터로 횡단보도·계단·기둥 예측)</span>
           <input id="gpsAssistToggle" type="checkbox" checked />
         </label>
@@ -588,6 +592,10 @@
           <div class="row">
             <div class="badge" id="status">초기화 중...</div>
             <div class="badge" id="engine">엔진: -</div>
+          </div>
+          <div class="row" style="align-items: center;">
+            <div class="badge" id="depthStatus">전방 거리: 대기</div>
+            <canvas id="depthCanvas" width="84" height="84" style="width: 84px; height: 84px; border-radius: 6px; background: #0d1328;" title="거리 지도 (빨강=가까움, 파랑=멂, 네모=판정 영역)"></canvas>
             <button id="btnCopyLog" class="secondary" style="padding: 4px 8px; font-size: 12px;">📋 로그 복사</button>
           </div>
           <div class="log" id="log"></div>
@@ -621,6 +629,7 @@
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.min.js"></script>
     <!-- 지도 -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" crossorigin="anonymous"></script>
+    <script src="depth.js"></script>
     <script src="geo.js"></script>
     <script src="crowd.js"></script>
     <script src="route.js"></script>

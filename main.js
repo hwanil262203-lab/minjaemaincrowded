@@ -38,6 +38,7 @@ const CLASS_INFO = {
   pole: { ko: '기둥·가로등', weight: 1.0, color: '#ef4444' },
   person: { ko: '사람', weight: 0.6, color: '#38bdf8' },
   vehicle: { ko: '차량', weight: 0.9, color: '#a855f7' },
+  blocked: { ko: '전방 막힘', weight: 1.0, color: '#ff3b3b' }, // 거리 추정(depth.js)으로 만든 가상 항목: 벽·닫힌 문·막다른 길
   // COCO 사전학습 모델로 파이프라인을 테스트할 때 쓰이는 보조 항목
   car: { ko: '자동차', weight: 0.9, color: '#a855f7' },
   bus: { ko: '버스', weight: 0.9, color: '#a855f7' },
@@ -281,7 +282,7 @@ async function createSession(modelUrl, providers) {
       // 워밍업 겸 출력 형식 확인
       const zeros = new ort.Tensor('float32', new Float32Array(3 * size * size), [1, 3, size, size]);
       const t0 = performance.now();
-      const out = await withTimeout(s.run({ [inName]: zeros }), CONFIG.loadTimeoutMs, `${ep} 워밍업`);
+      const out = await withTimeout(OrtQueue.run(() => s.run({ [inName]: zeros })), CONFIG.loadTimeoutMs, `${ep} 워밍업`);
       const od = out[outName].dims;
       session = s;
       engineName = ep;
@@ -515,6 +516,8 @@ const settings = {
   flashLevel: 'light', // light | mid | strong
   onboarded: false, // 첫 접속 안내를 봤는지
   gpsAssist: true, // 지도 데이터로 위험물 예측
+  depthAssist: true, // 거리 추정으로 전방 막힘(벽·막다른 길) 감지, 1초에 1회
+  depthWebGpu: true, // 거리 모델의 WebGPU 사용 여부 (감지 모델과 별개. 실패하면 자동으로 false 저장)
   navEnabled: true, // 도보 경로 안내
   voice: true, // 음성 안내
   crowdAvoid: 'mid', // 인파 회피 강도: off | weak | mid | strong
@@ -636,10 +639,10 @@ function drawDetections(ctx, dets, best) {
     const isBest = det === best;
     ctx.lineWidth = isBest ? 4 : 2;
     ctx.strokeStyle = det.color;
-    ctx.setLineDash(det.source === 'gps' ? [10, 6] : []);
+    ctx.setLineDash(det.source === 'gps' || det.source === 'depth' ? [10, 6] : []);
     ctx.strokeRect(det.x1, det.y1, det.x2 - det.x1, det.y2 - det.y1);
     ctx.setLineDash([]);
-    const text = det.source === 'gps' ? `${det.ko} GPS ${Math.round(det.gpsDist)}m` : `${det.ko} ${(det.score * 100).toFixed(0)}%${det.gpsBoost ? ' +GPS' : ''}`;
+    const text = det.source === 'depth' ? `${det.ko} (벽·막다른 길) ${det.depthM.toFixed(1)}m` : det.source === 'gps' ? `${det.ko} GPS ${Math.round(det.gpsDist)}m` : `${det.ko} ${(det.score * 100).toFixed(0)}%${det.gpsBoost ? ' +GPS' : ''}`;
     const tw = ctx.measureText(text).width + 8;
     ctx.fillStyle = det.color;
     ctx.fillRect(det.x1, Math.max(0, det.y1 - 18), tw, 18);
@@ -667,7 +670,7 @@ function updateDetectionList(dets, best) {
     .map((d) => {
       const cls = d === best ? 'danger' : '';
       return `<li class="${cls}"><span class="dot" style="background:${d.color}"></span>` +
-        `<b>${d.ko}</b> ${d.source === 'gps' ? `<span class="gps">GPS ${Math.round(d.gpsDist)}m</span>` : `${(d.score * 100).toFixed(0)}%${d.gpsBoost ? ' <span class="gps">+GPS</span>' : ''}`} · ${DIR_KO[d.dir]} · 근접 ${(d.prox * 100).toFixed(0)}%</li>`;
+        `<b>${d.ko}</b> ${d.source === 'depth' ? `<span class="gps">거리 추정 ${d.depthM.toFixed(1)}m</span>` : d.source === 'gps' ? `<span class="gps">GPS ${Math.round(d.gpsDist)}m</span>` : `${(d.score * 100).toFixed(0)}%${d.gpsBoost ? ' <span class="gps">+GPS</span>' : ''}`} · ${DIR_KO[d.dir]} · 근접 ${(d.prox * 100).toFixed(0)}%</li>`;
     })
     .join('');
 }
@@ -755,9 +758,10 @@ async function inferenceLoop() {
         const minProximity = parseFloat(ui.proximity.value) || 0.2;
 
         const lb = preprocess(src, inputSize);
-        const result = await withTimeout(session.run({ [inputName]: lb.tensor }), CONFIG.frameTimeoutMs, '추론');
+        const result = await withTimeout(OrtQueue.run(() => session.run({ [inputName]: lb.tensor })), CONFIG.frameTimeoutMs, '추론');
         if (!isRunning || myToken !== loopState.token) return;
         const dets = detectWithGps(result[outputName], lb, conf, vw, vh);
+        addDepthDetection(dets, vw, vh);
         const best = assess(dets, vw, vh, minProximity);
         const confirmed = updateHysteresis(best ? best.label : null, requiredFrames);
 
@@ -964,6 +968,7 @@ function syncSettingsUI() {
   document.getElementById('flashToggle').checked = settings.flash;
   document.getElementById('startFlashToggle').checked = settings.flash;
   document.getElementById('gpsAssistToggle').checked = settings.gpsAssist;
+  document.getElementById('depthToggle').checked = settings.depthAssist;
   document.getElementById('navToggle').checked = settings.navEnabled;
   document.getElementById('voiceToggle').checked = settings.voice;
   document.querySelectorAll('input[name="crowdAvoid"]').forEach((r) => (r.checked = r.value === settings.crowdAvoid));
@@ -995,6 +1000,12 @@ function bindSettingsUI() {
     settings.flash = e.target.checked;
     saveSettings();
     if (!settings.flash) setFlash(false);
+  });
+  document.getElementById('depthToggle').addEventListener('change', (e) => {
+    settings.depthAssist = e.target.checked;
+    saveSettings();
+    if (settings.depthAssist) ensureDepth();
+    else renderDepthStatus();
   });
   document.getElementById('gpsAssistToggle').addEventListener('change', (e) => {
     settings.gpsAssist = e.target.checked;
@@ -1101,6 +1112,7 @@ async function startApp() {
     Geo.enableCompass();
     startGeo();
   }
+  if (settings.depthAssist) ensureDepth();
 
   const imageUrl = new URLSearchParams(location.search).get('image');
   if (imageUrl) {
@@ -1143,6 +1155,62 @@ window.addEventListener('load', async () => {
 // GPS 보조 감지: 지도상 위험물이 앞에 있으면 낮은 신뢰도도 인정 + 모델이 못 봐도 경고
 // ============================================
 const GPS_KO = { crosswalk: '횡단보도', stairs: '계단', pole: '기둥·가로등' };
+
+// ============================================
+// 거리 추정(depth.js): 1초에 1회 실행해 전방 막힘(벽·막다른 길) 판단
+// ============================================
+const depthUI = { status: document.getElementById('depthStatus'), canvas: document.getElementById('depthCanvas') };
+let depthTimer = null;
+
+async function ensureDepth() {
+  if (Depth.state.ready || Depth.state.loading) return;
+  log('거리 추정 모델 로드 중... (Depth Anything V2 small)');
+  renderDepthStatus();
+  // 감지 모델(YOLO)은 일부 기기에서 WebGPU 커널(GatherND int64) 오류로 WASM 을 쓰지만, 거리 모델은 그 연산이 없어 WebGPU 가 된다 → 따로 판단
+  const ok = await Depth.load({ useWebGpu: settings.depthWebGpu });
+  if (ok && Depth.state.provider !== 'webgpu' && settings.depthWebGpu && navigator.gpu) {
+    settings.depthWebGpu = false;
+    saveSettings();
+    log('거리 모델: 이 기기의 WebGPU 에서 실패해 앞으로는 WASM 으로 실행합니다');
+  }
+  if (ok) log(`✓ 거리 추정 모델 로드 완료 (${Depth.state.provider}, 워밍업 ${Depth.state.loadMs}ms) — 1초에 1회 전방 막힘 판정`);
+  else log(`✗ 거리 추정 모델 로드 실패: ${Depth.state.error && Depth.state.error.message}`);
+  renderDepthStatus();
+  if (ok && !depthTimer) {
+    depthTimer = setInterval(() => {
+      if (!settings.depthAssist || !isRunning || Depth.state.busy) return;
+      if (Depth.state.ts && Date.now() - Depth.state.ts < Math.max(1000, Depth.state.lastMs * 1.2) - 50) return; // 1초 간격, 느린 기기는 그만큼 늦춤
+      const src = frameSource();
+      if (src.w && src.h) Depth.run(src);
+    }, 250);
+  }
+}
+
+Depth.onChange(() => {
+  renderDepthStatus();
+  Depth.draw(depthUI.canvas);
+});
+
+function renderDepthStatus() {
+  if (!depthUI.status) return;
+  const st = Depth.state;
+  if (!settings.depthAssist) depthUI.status.textContent = '전방 거리: 꺼짐';
+  else if (st.loading) depthUI.status.textContent = '전방 거리: 모델 로드 중';
+  else if (!st.ready) depthUI.status.textContent = '전방 거리: 사용 불가';
+  else if (!st.ts) depthUI.status.textContent = `전방 거리: 대기 (${st.provider})`;
+  else depthUI.status.textContent = `전방 ${st.blocked ? '막힘 ⚠' : '열림'} · 가운데 ${st.center.toFixed(1)}m · 위 ${st.top.toFixed(1)}m · ${st.lastMs}ms`;
+  depthUI.status.style.borderColor = st.blocked && settings.depthAssist ? '#ff3b3b' : '';
+}
+
+// 최근 1초 판정이 '막힘'이면 화면 가운데에 가상 박스를 넣어 기존 위험 처리(확정·진동)에 태운다
+function addDepthDetection(dets, vw, vh) {
+  if (!settings.depthAssist || !Depth.state.blocked || !Depth.recent(2500)) return dets;
+  if (dets.some((d) => d.source === 'depth')) return dets;
+  // 가까울수록 높은 점수 (2m → 0.5, 1m → 0.75, 0.5m 이하 → 0.9)
+  const score = Math.max(0.5, Math.min(0.9, 1 - Depth.state.center / 4));
+  dets.push({ label: 'blocked', score, x1: vw * 0.25, y1: vh * 0.15, x2: vw * 0.75, y2: vh, source: 'depth', depthM: Depth.state.center });
+  return dets;
+}
 
 function detectWithGps(output, lb, conf, vw, vh) {
   if (!settings.gpsAssist || !Geo.state.pos) return postprocess(output, lb, conf, vw, vh);
