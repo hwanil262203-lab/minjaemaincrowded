@@ -33,6 +33,8 @@ netlify/functions/seoul.js 서울시 API 중계 (배포용). tools/dev_proxy.py 
 samples/mock 오프라인 테스트용 실제 API 응답 (서울시청 → 서울역) + seoul_ppltn.json(가짜 혼잡도)
 ```
 
+2026-10-16: 본 저장소(minjae-main)의 감지 자가 복구·모델 로드 재시도·WebGPU 실패 기억·로그 복사 수정(2c889e8~139f0eb)을 이 복사본에도 합쳤다. 감지 쪽 코드는 본 저장소와 같고, 차이는 GPS·경로·인파 부분뿐이다.
+
 ### 데이터 소스 (모두 무료, 키 없음)
 
 | 용도 | 서비스 | 비고 |

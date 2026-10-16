@@ -21,6 +21,14 @@ const CONFIG = {
   gpsLowConf: 0.1,                 // 그 클래스는 이 낮은 신뢰도까지 감지로 인정
   gpsExpectDist: 35,               // 이 거리(m) 안이면 '예상됨'
   gpsAlertDist: { crosswalk: 15, stairs: 10, pole: 6 }, // 이 거리 안이면 모델이 못 봐도 경고
+  // 감지 루프 자가 복구
+  frameTimeoutMs: 8000, // 한 프레임 추론이 이보다 오래 걸리면 멈춘 것으로 보고 세션 재생성
+  loadTimeoutMs: 60000, // 모델 로드·워밍업 제한 시간
+  maxConsecutiveErrors: 3, // 연속 오류가 이만큼이면 세션 재생성
+  maxRecoveries: 3, // 빠른 세션 재생성 한도 (넘으면 모델 전체 재로드)
+  maxTotalRecoveries: 30, // 전체 재로드 한도 (넘으면 오류 창)
+  modelLoadAttempts: 30, // 모델 로드 자동 재시도 횟수
+  modelLoadRetryMs: 3000, // 재시도 간격
 };
 
 // 클래스별 한국어 이름, 위험 가중치(0~1), 색. 키는 labels.json 의 영어 이름.
@@ -50,6 +58,7 @@ const ui = {
   video: document.getElementById('video'),
   overlay: document.getElementById('overlay'),
   btnCamera: document.getElementById('btnCamera'),
+  btnLoadModel: document.getElementById('btnLoadModel'),
   btnStart: document.getElementById('btnStart'),
   btnStop: document.getElementById('btnStop'),
   threshold: document.getElementById('threshold'),
@@ -147,10 +156,26 @@ async function loadTestImage(url) {
 // ============================================
 // 모델 로드 (ONNX Runtime Web)
 // ============================================
-async function loadModel() {
+async function loadModel(opts = {}) {
+  if (modelLoading) {
+    log('모델을 이미 불러오는 중입니다.');
+    return false;
+  }
+  if (session && !opts.force) {
+    log('모델이 이미 준비되어 있습니다.');
+    return true;
+  }
+  modelLoading = true;
+  setModelButton('loading');
   try {
     setStatus('모델 로딩 중...');
     ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${CONFIG.ortVersion}/dist/`;
+    ort.env.wasm.numThreads = Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1));
+    if (session) {
+      const old = session;
+      session = null;
+      try { await old.release(); } catch (_) { /* 무시 */ }
+    }
 
     // labels.json (없어도 동작: 클래스 이름이 숫자로 표시됨)
     try {
@@ -161,6 +186,7 @@ async function loadModel() {
     }
     // 모델 파일이 없으면(아직 학습 전) 시험용 사전학습 모델로 대체
     let modelUrl = CONFIG.modelUrl;
+    usingFallbackModel = false;
     try {
       const head = await fetch(modelUrl, { method: 'HEAD', cache: 'no-store' });
       if (!head.ok) throw new Error(`HTTP ${head.status}`);
@@ -175,53 +201,158 @@ async function loadModel() {
         /* 무시 */
       }
     }
+    activeModelUrl = modelUrl;
     log(`모델 파일: ${modelUrl}`);
 
-    // WebGPU 우선, 실패하면 WASM
-    const providers = navigator.gpu ? ['webgpu', 'wasm'] : ['wasm'];
-    let lastErr = null;
-    for (const ep of providers) {
-      try {
-        session = await ort.InferenceSession.create(modelUrl, {
-          executionProviders: [ep],
-          graphOptimizationLevel: 'all',
-        });
-        engineName = ep;
-        break;
-      } catch (e) {
-        lastErr = e;
-        log(`${ep} 초기화 실패 → 다음 백엔드 시도 (${e.message.split('\n')[0]})`);
-      }
-    }
-    if (!session) throw lastErr || new Error('세션 생성 실패');
+    // WebGPU 우선, 실패하면 WASM. (opts.wasmOnly 면 처음부터 WASM)
+    const providers = opts.providers || (navigator.gpu && settings.useWebGpu && !opts.wasmOnly ? ['webgpu', 'wasm'] : ['wasm']);
+    if (navigator.gpu && !settings.useWebGpu) log('이 기기에서는 WebGPU 를 건너뛰고 WASM 으로 실행합니다 (설정에서 바꿀 수 있음)');
+    await createSession(modelUrl, providers);
 
-    inputName = session.inputNames[0];
-    outputName = session.outputNames[0];
-
-    // 입력 크기: 모델 메타데이터 → labels.json → 640 순서로 결정
-    inputSize = labels.imgsz || 640;
-    const meta = session.inputMetadata && session.inputMetadata[0];
-    const dims = meta && (meta.shape || meta.dims);
-    if (dims && typeof dims[2] === 'number' && dims[2] > 0) inputSize = dims[2];
-
-    // 워밍업 겸 출력 형식 확인
-    const zeros = new ort.Tensor('float32', new Float32Array(3 * inputSize * inputSize), [1, 3, inputSize, inputSize]);
-    const t0 = performance.now();
-    const out = await session.run({ [inputName]: zeros });
-    const od = out[outputName].dims;
-    const nmsInModel = od.length === 3 && od[2] === 6;
-    labels.nms_in_model = nmsInModel;
-
-    ui.engine.textContent = `${engineName.toUpperCase()} · ${inputSize}px · NMS ${nmsInModel ? '내장' : 'JS'}` +
-      (usingFallbackModel ? ' · 시험용 모델' : '');
-    log(`✓ 모델 로드 완료 (${engineName}, 입력 ${inputSize}px, 출력 [${od.join(',')}], 워밍업 ${Math.round(performance.now() - t0)}ms)`);
+    ui.engine.textContent = engineLabel();
     log(`클래스: ${labels.names.join(', ') || '(labels.json 없음)'}`);
     setStatus(usingFallbackModel ? '시험용 모델 준비 완료' : '모델 준비 완료');
+    setModelButton('ready');
+    loopState.recoveries = 0;
+    return true;
   } catch (e) {
     log(`✗ 모델 로드 실패: ${e.message}`);
     console.error('모델 로드 오류:', e);
-    setStatus('모델 로드 실패');
+    setStatus('모델 로드 실패 — 🔄 모델 로드 버튼을 눌러 다시 시도');
     session = null;
+    setModelButton('retry');
+    return false;
+  } finally {
+    modelLoading = false;
+  }
+}
+
+let modelLoading = false;
+let activeModelUrl = null;
+
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} 시간 초과 (${ms}ms)`)), ms);
+    promise.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
+    );
+  });
+}
+
+function engineLabel() {
+  return `${engineName.toUpperCase()} · ${inputSize}px · NMS ${labels.nms_in_model ? '내장' : 'JS'}` +
+    (usingFallbackModel ? ' · 시험용 모델' : '');
+}
+
+function setModelButton(state) {
+  const b = ui.btnLoadModel;
+  if (!b) return;
+  if (state === 'loading') {
+    b.disabled = true;
+    b.textContent = '⏳ 모델 로드 중...';
+  } else if (state === 'ready') {
+    b.disabled = false;
+    b.textContent = '🔄 모델 다시 로드';
+    b.classList.add('secondary');
+  } else {
+    b.disabled = false;
+    b.textContent = '🔄 모델 로드';
+    b.classList.remove('secondary'); // 실패 시 눈에 띄게
+  }
+}
+
+// 세션 생성 + 워밍업. providers 를 순서대로 시도해 처음 성공한 것을 쓴다
+async function createSession(modelUrl, providers) {
+  let lastErr = null;
+  for (const ep of providers) {
+    try {
+      const s = await withTimeout(
+        ort.InferenceSession.create(modelUrl, { executionProviders: [ep], graphOptimizationLevel: 'all' }),
+        CONFIG.loadTimeoutMs, `${ep} 세션 생성`
+      );
+      const inName = s.inputNames[0];
+      const outName = s.outputNames[0];
+      // 입력 크기: 모델 메타데이터 → labels.json → 640 순서로 결정
+      let size = labels.imgsz || 640;
+      const meta = s.inputMetadata && s.inputMetadata[0];
+      const dims = meta && (meta.shape || meta.dims);
+      if (dims && typeof dims[2] === 'number' && dims[2] > 0) size = dims[2];
+      // 워밍업 겸 출력 형식 확인
+      const zeros = new ort.Tensor('float32', new Float32Array(3 * size * size), [1, 3, size, size]);
+      const t0 = performance.now();
+      const out = await withTimeout(s.run({ [inName]: zeros }), CONFIG.loadTimeoutMs, `${ep} 워밍업`);
+      const od = out[outName].dims;
+      session = s;
+      engineName = ep;
+      inputName = inName;
+      outputName = outName;
+      inputSize = size;
+      labels.nms_in_model = od.length === 3 && od[2] === 6;
+      log(`✓ 모델 로드 완료 (${ep}, 입력 ${size}px, 출력 [${od.join(',')}], 워밍업 ${Math.round(performance.now() - t0)}ms)`);
+      return true;
+    } catch (e) {
+      lastErr = e;
+      log(`${ep} 초기화 실패 → 다음 백엔드 시도 (${String((e && e.message) || e).split('\n')[0]})`);
+    }
+  }
+  throw lastErr || new Error('세션 생성 실패');
+}
+
+// 모델이 로드될 때까지 반복 시도. 한도를 넘으면 오류 창을 띄운다.
+let modelRetryPromise = null;
+
+function showErrorModal(text) {
+  const m = document.getElementById('errorModal');
+  if (!m) return;
+  document.getElementById('errorModalText').textContent = text;
+  m.hidden = false;
+}
+
+function ensureModel(maxAttempts = CONFIG.modelLoadAttempts, delayMs = CONFIG.modelLoadRetryMs) {
+  if (session) return Promise.resolve(true);
+  if (modelRetryPromise) return modelRetryPromise; // 이미 재시도 중이면 그 결과를 함께 기다림
+  modelRetryPromise = (async () => {
+    try {
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (session) return true;
+        if (attempt > 1) {
+          setStatus(`모델 로드 재시도 ${attempt}/${maxAttempts}...`);
+          log(`모델 로드 재시도 ${attempt}/${maxAttempts}`);
+        }
+        const ok = await loadModel();
+        if (ok && session) return true;
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+      log(`✗ 모델 로드 ${maxAttempts}회 실패`);
+      setStatus('모델 로드 실패');
+      showErrorModal('모델 로드에 실패했습니다. 다시 접속하여 주십시오.');
+      return false;
+    } finally {
+      modelRetryPromise = null;
+    }
+  })();
+  return modelRetryPromise;
+}
+
+// 추론이 멈추거나 오류가 반복되면 세션을 새로 만든다 (WebGPU 가 문제면 WASM 으로 내려감)
+async function recoverSession(reason) {
+  loopState.recoveries += 1;
+  if (loopState.recoveries > CONFIG.maxRecoveries) {
+    log(`✗ 복구 한도(${CONFIG.maxRecoveries}회) 초과`);
+    return false;
+  }
+  log(`⚠ ${reason} → 모델을 WASM 으로 다시 불러옵니다 (복구 ${loopState.recoveries}/${CONFIG.maxRecoveries})`);
+  const old = session;
+  session = null;
+  try { if (old) await old.release(); } catch (_) { /* 무시 */ }
+  try {
+    await createSession(activeModelUrl || CONFIG.modelUrl, ['wasm']);
+    ui.engine.textContent = engineLabel() + ' · 복구됨';
+    return true;
+  } catch (e) {
+    log(`✗ 복구 실패: ${e.message}`);
+    return false;
   }
 }
 
@@ -390,6 +521,7 @@ const settings = {
   seoulLive: false, // 서울 실시간 혼잡도(API 키·중계 서버 필요)
   seoulProxy: '', // 비우면 자동: Netlify 는 /.netlify/functions/seoul, 로컬은 http://127.0.0.1:8002/seoul
   seoulKey: '', // 서울열린데이터광장 인증키 (사용자 입력, 이 기기에만 저장)
+  useWebGpu: true, // WebGPU 시도 여부. 기기에서 실패하면 자동으로 false 로 저장
 };
 
 // 인파 회피 설정 → Route.plan 에 넘길 옵션
@@ -579,25 +711,41 @@ setInterval(refreshIndicator, 1000);
 // ============================================
 const perf = { ms: 0, frames: 0, lastReport: 0 };
 
+// 감지 루프 상태 (멈춤·오류 복구용)
+const loopState = { token: 0, inFlight: false, frameStart: 0, lastTick: 0, consecutiveErrors: 0, recoveries: 0, totalRecoveries: 0, okStreak: 0, lastVideoTime: -1, lastVideoChange: 0 };
+
 async function inferenceLoop() {
-  if (!session || !(webcamStream || testImage)) {
-    log('✗ 모델 또는 카메라가 준비되지 않았습니다.');
+  if (!session) {
+    log('✗ 모델이 준비되지 않았습니다. 🔄 모델 로드 버튼을 눌러 주세요.');
+    setStatus('모델 없음 — 🔄 모델 로드 필요');
+    setModelButton('retry');
+    return;
+  }
+  if (!(webcamStream || testImage)) {
+    log('✗ 카메라가 준비되지 않았습니다. 📷 카메라 시작을 눌러 주세요.');
     return;
   }
   if (isRunning) return;
   isRunning = true;
+  loopState.token += 1;
+  const myToken = loopState.token;
+  loopState.consecutiveErrors = 0;
+  loopState.lastTick = performance.now();
   setStatus('감지 중...');
   log('감지 시작됨');
   const ctx = ui.overlay.getContext('2d');
 
   const step = async () => {
-    if (!isRunning) return;
+    if (!isRunning || myToken !== loopState.token) return;
     const t0 = performance.now();
+    loopState.inFlight = true;
+    loopState.frameStart = t0;
+    loopState.lastTick = t0;
     try {
       const src = frameSource();
       const vw = src.w;
       const vh = src.h;
-      if (vw && vh) {
+      if (vw && vh && session) {
         if (ui.overlay.width !== vw) {
           ui.overlay.width = vw;
           ui.overlay.height = vh;
@@ -607,7 +755,8 @@ async function inferenceLoop() {
         const minProximity = parseFloat(ui.proximity.value) || 0.2;
 
         const lb = preprocess(src, inputSize);
-        const result = await session.run({ [inputName]: lb.tensor });
+        const result = await withTimeout(session.run({ [inputName]: lb.tensor }), CONFIG.frameTimeoutMs, '추론');
+        if (!isRunning || myToken !== loopState.token) return;
         const dets = detectWithGps(result[outputName], lb, conf, vw, vh);
         const best = assess(dets, vw, vh, minProximity);
         const confirmed = updateHysteresis(best ? best.label : null, requiredFrames);
@@ -619,13 +768,52 @@ async function inferenceLoop() {
         if (confirmed && best) vibrateFor(best);
         else stopVibration();
         health.lastFrameTs = performance.now();
+        loopState.consecutiveErrors = 0;
+        loopState.okStreak += 1;
+        if (loopState.okStreak === 100) loopState.recoveries = 0; // 한동안 잘 돌면 복구 횟수 초기화
       }
     } catch (e) {
+      loopState.consecutiveErrors += 1;
+      loopState.okStreak = 0;
+      const msg = String((e && e.message) || e).split('\n')[0];
       console.error('추론 오류:', e);
-      log(`감지 오류: ${e.message}`);
-      stopLoop();
-      return;
+      log(`감지 오류 ${loopState.consecutiveErrors}회 (${engineName}): ${msg}`);
+      const timedOut = /시간 초과/.test(msg);
+      const gpuErr = engineName === 'webgpu' && /webgpu|kernel|gpu|unsupported/i.test(msg);
+      if (gpuErr && settings.useWebGpu) {
+        settings.useWebGpu = false;
+        saveSettings();
+        log('⚠ 이 기기의 WebGPU 가 모델을 실행하지 못합니다. 앞으로는 처음부터 WASM 으로 실행합니다.');
+      }
+      if (timedOut || gpuErr || loopState.consecutiveErrors >= CONFIG.maxConsecutiveErrors) {
+        const ok = await recoverSession(timedOut ? '추론이 응답하지 않음' : gpuErr ? 'WebGPU 실행 실패' : '오류 반복');
+        if (!ok) {
+          // 빠른 복구가 막히면 정지하지 않고 모델 전체를 다시 불러온 뒤 자동으로 재시작
+          loopState.inFlight = false;
+          stopLoop();
+          loopState.totalRecoveries += 1;
+          if (loopState.totalRecoveries > CONFIG.maxTotalRecoveries) {
+            setStatus('감지 중단');
+            showErrorModal('감지를 계속할 수 없습니다. 다시 접속하여 주십시오.');
+            return;
+          }
+          setStatus('모델을 다시 불러오는 중...');
+          log(`↻ 모델 전체 재로드 후 자동 재시작 (${loopState.totalRecoveries}/${CONFIG.maxTotalRecoveries})`);
+          loopState.recoveries = 0;
+          const stale = session;
+          session = null; // 기존 세션을 버리고 완전히 새로 불러온다
+          if (stale) stale.release().catch(() => {});
+          ensureModel().then((loaded) => {
+            if (loaded && (webcamStream || testImage)) inferenceLoop();
+          });
+          return;
+        }
+        loopState.consecutiveErrors = 0;
+      }
+    } finally {
+      loopState.inFlight = false;
     }
+    if (!isRunning || myToken !== loopState.token) return;
     // 성능 표시
     perf.ms = perf.ms * 0.8 + (performance.now() - t0) * 0.2;
     perf.frames += 1;
@@ -633,20 +821,83 @@ async function inferenceLoop() {
       perf.lastReport = performance.now();
       setStatus(`감지 중 · ${Math.round(perf.ms)}ms/프레임 (${(1000 / Math.max(1, perf.ms)).toFixed(1)} FPS)`);
     }
-    animationHandle = requestAnimationFrame(step);
+    scheduleNext(step);
   };
   step();
 }
 
+// 다음 프레임 예약: requestAnimationFrame 이 오지 않는 환경(일부 모바일 브라우저, 백그라운드)에서는 타이머로 진행
+function scheduleNext(step) {
+  let fired = false;
+  const go = () => {
+    if (fired) return;
+    fired = true;
+    step();
+  };
+  animationHandle = requestAnimationFrame(go);
+  setTimeout(go, document.hidden ? 1000 : 300);
+}
+
 function stopLoop() {
   isRunning = false;
+  loopState.token += 1;
   stopVibration();
   updateFloatingIndicator(false);
   setStatus('정지됨');
   if (animationHandle) cancelAnimationFrame(animationHandle);
 }
 
+function reopenCamera(why) {
+  log(`⚠ ${why} → 카메라를 다시 엽니다`);
+  try { if (webcamStream) webcamStream.getTracks().forEach((t) => t.stop()); } catch (_) { /* 무시 */ }
+  webcamStream = null;
+  ui.video.srcObject = null;
+  openCamera();
+}
+
+// 감시: 루프가 멈추거나 카메라 영상이 얼면 스스로 복구
+setInterval(() => {
+  if (!isRunning) return;
+  const now = performance.now();
+  // 1) 추론 Promise 가 끝내 돌아오지 않음 (withTimeout 도 못 잡는 극단 상황)
+  if (loopState.inFlight && now - loopState.frameStart > CONFIG.frameTimeoutMs + 15000) {
+    log('⚠ 감지 루프가 응답하지 않아 다시 시작합니다');
+    isRunning = false;
+    loopState.token += 1;
+    loopState.inFlight = false;
+    inferenceLoop();
+    return;
+  }
+  // 2) 다음 프레임이 예약되지 않은 채 멈춤
+  if (!loopState.inFlight && now - loopState.lastTick > 6000 && !document.hidden) {
+    log('⚠ 감지가 멈춘 것을 감지해 다시 시작합니다');
+    isRunning = false;
+    loopState.token += 1;
+    inferenceLoop();
+    return;
+  }
+  // 3) 카메라 스트림이 끊기거나 영상이 얼어 있음
+  if (webcamStream && !testImage) {
+    const v = ui.video;
+    const track = webcamStream.getVideoTracks()[0];
+    if (track && track.readyState === 'ended') {
+      reopenCamera('카메라 스트림이 끊김');
+      return;
+    }
+    if (v.paused && v.readyState >= 2) v.play().catch(() => {});
+    if (v.currentTime !== loopState.lastVideoTime) {
+      loopState.lastVideoTime = v.currentTime;
+      loopState.lastVideoChange = now;
+    } else if (loopState.lastVideoChange && now - loopState.lastVideoChange > 5000 && !document.hidden) {
+      loopState.lastVideoChange = now;
+      reopenCamera('카메라 영상이 5초 이상 멈춤');
+    }
+  }
+}, 2000);
+
 ui.btnCamera.addEventListener('click', openCamera);
+ui.btnLoadModel.addEventListener('click', () => (session ? loadModel({ force: true }) : ensureModel()));
+document.getElementById('btnErrorReload').addEventListener('click', () => location.reload());
 ui.btnStart.addEventListener('click', inferenceLoop);
 ui.btnStop.addEventListener('click', stopLoop);
 
@@ -720,6 +971,7 @@ function syncSettingsUI() {
   document.getElementById('seoulProxy').value = settings.seoulProxy;
   document.getElementById('seoulKey').value = settings.seoulKey;
   document.getElementById('seoulFields').hidden = !settings.seoulLive;
+  document.getElementById('webgpuToggle').checked = settings.useWebGpu;
 }
 
 function bindSettingsUI() {
@@ -797,6 +1049,20 @@ function bindSettingsUI() {
       out.textContent = `✗ 실패: ${e.message} · 중계 서버가 켜져 있는지, 인증키가 맞는지 확인하세요`;
     }
   });
+  document.getElementById('webgpuToggle').addEventListener('change', (e) => {
+    settings.useWebGpu = e.target.checked;
+    saveSettings();
+    log(`GPU 가속 ${settings.useWebGpu ? '사용' : '사용 안 함'} — 🔄 모델 다시 로드 를 누르면 적용됩니다`);
+  });
+  document.getElementById('btnCopyLog').addEventListener('click', async () => {
+    const text = [navigator.userAgent, ui.engine.textContent, ui.status.textContent, '', ui.log.textContent].join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      log('📋 로그를 복사했습니다. 메시지로 붙여 넣어 보내 주세요.');
+    } catch (_) {
+      window.prompt('아래 내용을 길게 눌러 복사하세요', text);
+    }
+  });
   document.getElementById('btnVibTest').addEventListener('click', () => {
     if (!testVibration()) log('진동을 지원하지 않거나 차단된 기기입니다.');
   });
@@ -842,11 +1108,16 @@ async function startApp() {
   } else if (!webcamStream) {
     await openCamera();
   }
+  // 모델이 아직 없으면(로드 실패·지연) 한 번 더 시도
+  if (!session) await ensureModel();
   if (session && (webcamStream || testImage)) {
     log('🚀 감지를 시작합니다...');
     inferenceLoop();
+  } else if (!session) {
+    log('✗ 모델이 없어 시작하지 못했습니다. 🔄 모델 로드 버튼을 눌러 주세요.');
+    setModelButton('retry');
   } else {
-    log('✗ 시작 실패: 모델 또는 카메라가 준비되지 않았습니다.');
+    log('✗ 카메라가 준비되지 않았습니다. 📷 카메라 시작을 눌러 주세요.');
   }
 }
 
@@ -864,7 +1135,7 @@ window.addEventListener('load', async () => {
   }
   log(`✓ ONNX Runtime Web ${ort.env.versions ? ort.env.versions.web || '' : ''} 로드 완료`);
   showStartOverlay();
-  await loadModel();
+  await ensureModel();
 });
 
 

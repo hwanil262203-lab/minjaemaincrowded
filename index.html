@@ -462,6 +462,15 @@
       </div>
     </div>
 
+    <!-- 오류 창 -->
+    <div id="errorModal" class="modal" hidden>
+      <div class="card">
+        <h2>⚠ 오류</h2>
+        <p id="errorModalText" style="font-size: 16px;">모델 로드에 실패했습니다. 다시 접속하여 주십시오.</p>
+        <button id="btnErrorReload" class="big">다시 접속</button>
+      </div>
+    </div>
+
     <!-- 설정 창 -->
     <div id="settingsPanel" class="modal" hidden>
       <div class="card">
@@ -535,6 +544,10 @@
         </div>
 
         <h3>고급 (감지 민감도)</h3>
+        <label class="toggle">
+          <span>GPU 가속(WebGPU) 사용 — 이 기기에서 실패하면 자동으로 꺼짐</span>
+          <input id="webgpuToggle" type="checkbox" checked />
+        </label>
         <div class="row">
           <label>신뢰도 임계치</label>
           <input id="threshold" type="number" min="0" max="1" step="0.05" value="0.25" />
@@ -563,9 +576,10 @@
           <canvas id="overlay"></canvas>
         </section>
         <aside class="sidebar">
-          <div class="hint">💡 진동 패턴: 왼쪽 1회 · 정면 2회 · 오른쪽 3회, 가까우면 짧고 빠르게. 오른쪽 위 동그라미: 초록 ✓ 정상 · 노랑 ! 비정상 · 빨강 ! 위험</div>
+          <div class="hint">💡 오른쪽 위 동그라미: 초록 ✓ 정상 작동 · 노랑 ! 감지 중단 · 빨강 ! 위험</div>
           <div class="row">
             <button id="btnCamera">📷 카메라 시작</button>
+            <button id="btnLoadModel" class="secondary">🔄 모델 로드</button>
           </div>
           <div class="row">
             <button id="btnStart">▶️ 감지 시작</button>
@@ -574,6 +588,7 @@
           <div class="row">
             <div class="badge" id="status">초기화 중...</div>
             <div class="badge" id="engine">엔진: -</div>
+            <button id="btnCopyLog" class="secondary" style="padding: 4px 8px; font-size: 12px;">📋 로그 복사</button>
           </div>
           <div class="log" id="log"></div>
         </aside>
