@@ -506,6 +506,34 @@
           <input id="voiceToggle" type="checkbox" checked />
         </label>
 
+        <h3>인파 회피 (경로 선택)</h3>
+        <p style="font-size: 12px; color: #6b7a99;">전국: 지도(OpenStreetMap)의 역·정류장·시장·학교·상점 밀도와 시간대(출퇴근·점심·하교·주말)로 인파를 추정해 사람이 적은 경로를 고릅니다. 강할수록 조금 돌아가더라도 한적한 길을 택합니다.</p>
+        <div class="choice" id="crowdAvoidChoice">
+          <label><input type="radio" name="crowdAvoid" value="off" /><span>끔</span></label>
+          <label><input type="radio" name="crowdAvoid" value="weak" /><span>약</span></label>
+          <label><input type="radio" name="crowdAvoid" value="mid" checked /><span>중</span></label>
+          <label><input type="radio" name="crowdAvoid" value="strong" /><span>강</span></label>
+        </div>
+        <label class="toggle">
+          <span>서울 실시간 혼잡도 사용 (서울시 도시데이터 121곳)</span>
+          <input id="seoulLiveToggle" type="checkbox" />
+        </label>
+        <div id="seoulFields" hidden>
+          <p style="font-size: 12px; color: #6b7a99;">브라우저가 서울시 API 를 직접 부를 수 없어 중계 서버가 필요합니다. 비우면 Netlify 배포는 <code>/.netlify/functions/seoul</code>, PC 테스트는 <code>http://127.0.0.1:8002/seoul</code> (<code>py -3 tools/dev_proxy.py</code>) 을 씁니다. 인증키는 서울열린데이터광장에서 발급받아 입력하며 이 기기에만 저장됩니다. 비우면 샘플 키(광화문·덕수궁만 동작).</p>
+          <div class="row">
+            <label>중계 주소</label>
+            <input id="seoulProxy" type="text" placeholder="(자동)" style="flex: 1" />
+          </div>
+          <div class="row">
+            <label>인증키</label>
+            <input id="seoulKey" type="password" placeholder="(샘플 키)" style="flex: 1" autocomplete="off" />
+          </div>
+          <div class="row">
+            <button id="btnSeoulTest" class="secondary">🔎 연결 확인 (광화문·덕수궁)</button>
+          </div>
+          <div id="seoulTestResult" class="muted" style="font-size: 12px"></div>
+        </div>
+
         <h3>고급 (감지 민감도)</h3>
         <div class="row">
           <label>신뢰도 임계치</label>
@@ -570,7 +598,7 @@
         </div>
         <div id="navStatus" class="muted">위치 확인 중...</div>
         <div id="map"></div>
-        <div style="font-size: 11px; color: #6b7a99;">지도·경로·위험물 데이터 © OpenStreetMap 기여자 · 경로: OSRM(FOSSGIS) · 인파 지표는 상점·역 밀집도로 추정</div>
+        <div style="font-size: 11px; color: #6b7a99;">지도·경로·위험물 데이터 © OpenStreetMap 기여자 · 경로: OSRM(FOSSGIS) · 인파: 역·시장·학교·상점 밀도 × 시간대 추정, 서울은 서울시 실시간 도시데이터(선택)</div>
       </section>
     </main>
 
@@ -579,6 +607,7 @@
     <!-- 지도 -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" crossorigin="anonymous"></script>
     <script src="geo.js"></script>
+    <script src="crowd.js"></script>
     <script src="route.js"></script>
     <script src="main.js"></script>
   </body>

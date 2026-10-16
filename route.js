@@ -2,7 +2,7 @@
   route.js — 도보 경로 탐색·점수화·안내 모듈
   - 주소 검색: Nominatim (OpenStreetMap)
   - 도보 경로: OSRM foot 프로파일 (routing.openstreetmap.de, 대안 경로 최대 3개)
-  - 경로 점수: 소요 시간 + 횡단보도·계단·기둥 가산 + 인파 지표(POI 밀도) 가산 → 가장 낮은 점수 선택
+  - 경로 점수: 소요 시간 + 횡단보도·계단·기둥 가산 + 인파 가산(crowd.js: POI 종류별 가중 밀도 × 시간대, 서울 실시간 혼잡도) → 가장 낮은 점수 선택
   - 안내: 경로 위 투영으로 남은 거리/이탈 여부 계산, 다음 회전 지점 음성 안내, 이탈 시 재탐색
 */
 const Route = (() => {
@@ -10,7 +10,7 @@ const Route = (() => {
   const NOMINATIM = 'https://nominatim.openstreetmap.org/search';
 
   // 가산 점수(초). 횡단보도 1곳 = 25초 더 걸리는 것과 같게 취급
-  const PENALTY = { crosswalk: 25, stairs: 40, pole: 2, poi: 0.8 };
+  const PENALTY = { crosswalk: 25, stairs: 40, pole: 2 }; // 인파 가산은 crowd.js 참고
   const OFF_ROUTE_M = 30;   // 경로에서 이만큼 벗어나면 이탈 후보
   const OFF_ROUTE_N = 3;    // 연속 n회 이탈이면 재탐색
   const ANNOUNCE_M = 25;    // 회전 지점 n m 앞에서 안내
@@ -20,6 +20,7 @@ const Route = (() => {
     routes: [], chosen: null, dest: null, from: null,
     active: false, stepIdx: 0, announced: new Set(), offCount: 0,
     lastProgress: null, listeners: [], areaHazards: [], areaPois: [], replanning: false,
+    crowdOpts: null, seoulLevels: [],
   };
 
   function emit(type, payload) {
@@ -86,30 +87,51 @@ const Route = (() => {
     return n;
   }
 
-  function score(route, hazards, pois) {
+  // crowd: { strength: 'off'|'weak'|'mid'|'strong', seoulLevels: [...] }
+  function score(route, hazards, pois, crowd = {}) {
     const cw = nearCount(route.coords, hazards.filter((h) => h.type === 'crosswalk'), 15);
     const st = nearCount(route.coords, hazards.filter((h) => h.type === 'stairs'), 12);
     const po = nearCount(route.coords, hazards.filter((h) => h.type === 'pole'), 6);
-    const crowd = nearCount(route.coords, pois, 35);
     const km = route.distance / 1000;
-    const penalty = cw * PENALTY.crosswalk + st * PENALTY.stairs + po * PENALTY.pole + crowd * PENALTY.poi;
-    return { total: route.duration + penalty, cw, st, po, crowd, crowdPerKm: km > 0 ? Math.round(crowd / km) : 0, penalty: Math.round(penalty) };
+    let penalty = cw * PENALTY.crosswalk + st * PENALTY.stairs + po * PENALTY.pole;
+    let crowdInfo = null;
+    const strength = crowd.strength || 'mid';
+    if (strength !== 'off' && typeof Crowd !== 'undefined') {
+      // 인파: 종류별 가중 POI 밀도 × 시간대 + 서울 실시간 혼잡도 (crowd.js)
+      crowdInfo = Crowd.scoreRoute(route, pois, crowd.seoulLevels || [], strength);
+      penalty += crowdInfo.penalty;
+    }
+    const crowdN = nearCount(route.coords, pois, 35);
+    return {
+      total: route.duration + penalty, cw, st, po, crowd: crowdN,
+      crowdPerKm: crowdInfo ? crowdInfo.index : km > 0 ? Math.round(crowdN / km) : 0,
+      crowdInfo, penalty: Math.round(penalty),
+    };
   }
 
   // from → to 경로 계획. opts.considerHazards=false 면 최단 시간만
+  // opts.crowd = { strength, seoul: { enabled, proxy, key } }
   async function plan(from, to, opts = {}) {
     const routes = await fetchRoutes(from, to);
-    let hazards = [], pois = [];
+    let hazards = [], pois = [], seoulLevels = [];
+    const crowdOpt = opts.crowd || state.crowdOpts || {};
     if (opts.considerHazards !== false) {
       const bb = bboxOf(routes);
       const span = Geo.distance({ lat: bb.s, lon: bb.w }, { lat: bb.n, lon: bb.e });
       if (span < 6000) { // 너무 넓은 영역은 데이터 요청을 생략
         try { hazards = await Geo.fetchHazardsBbox(bb); } catch (e) { console.warn('위험물 데이터 실패', e); }
-        try { pois = await Geo.fetchPois(bb); } catch (e) { console.warn('POI 데이터 실패', e); }
+        if (crowdOpt.strength !== 'off') {
+          try { pois = await Geo.fetchPois(bb); } catch (e) { console.warn('POI 데이터 실패', e); }
+        }
+      }
+      if (crowdOpt.strength !== 'off' && crowdOpt.seoul && crowdOpt.seoul.enabled && typeof Crowd !== 'undefined') {
+        try { seoulLevels = await Crowd.seoulLevelsForRoutes(routes, crowdOpt.seoul); } catch (e) { console.warn('서울 혼잡도 실패', e); }
       }
     }
+    state.crowdOpts = crowdOpt;
+    state.seoulLevels = seoulLevels;
     routes.forEach((r) => {
-      r.score = score(r, hazards, pois);
+      r.score = score(r, hazards, pois, { strength: crowdOpt.strength, seoulLevels });
       // 각 안내 지점이 경로 좌표열의 몇 번째 점인지 기록 (통과 판정용)
       for (const s of r.steps) {
         let bi = 0, bd = Infinity;
@@ -196,7 +218,7 @@ const Route = (() => {
       state.offCount = 0;
       state.replanning = true;
       emit('say', '경로를 벗어났습니다. 다시 찾습니다');
-      plan(pos, state.dest, { considerHazards: true })
+      plan(pos, state.dest, { considerHazards: true, crowd: state.crowdOpts })
         .then(() => emit('rerouted', state.chosen))
         .catch((e) => emit('error', e))
         .finally(() => { state.replanning = false; });

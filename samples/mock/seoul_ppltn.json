@@ -1,0 +1,10 @@
+{
+  "서울역": { "AREA_NM": "서울역", "AREA_CD": "POI033", "AREA_CONGEST_LVL": "붐빔", "AREA_CONGEST_MSG": "팔 다리가 부딪힐 정도로 사람이 많아요. 도보 이동 시 불편할 수 있어요.", "AREA_PPLTN_MIN": "52000", "AREA_PPLTN_MAX": "55000", "PPLTN_TIME": "2026-10-15 17:40", "source": "mock" },
+  "숭례문": { "AREA_NM": "숭례문", "AREA_CD": "POI131", "AREA_CONGEST_LVL": "약간 붐빔", "AREA_CONGEST_MSG": "사람들이 몰려있을 가능성이 크고 도보 이동 시 부딪힘이 발생할 수 있어요.", "AREA_PPLTN_MIN": "9000", "AREA_PPLTN_MAX": "10000", "PPLTN_TIME": "2026-10-15 17:40", "source": "mock" },
+  "남대문시장": { "AREA_NM": "남대문시장", "AREA_CD": "POI115", "AREA_CONGEST_LVL": "붐빔", "AREA_CONGEST_MSG": "팔 다리가 부딪힐 정도로 사람이 많아요.", "AREA_PPLTN_MIN": "30000", "AREA_PPLTN_MAX": "32000", "PPLTN_TIME": "2026-10-15 17:40", "source": "mock" },
+  "북창동 먹자골목": { "AREA_NM": "북창동 먹자골목", "AREA_CD": "POI114", "AREA_CONGEST_LVL": "보통", "AREA_CONGEST_MSG": "사람이 몰려있을 수 있지만 크게 붐비지는 않아요.", "AREA_PPLTN_MIN": "7000", "AREA_PPLTN_MAX": "8000", "PPLTN_TIME": "2026-10-15 17:40", "source": "mock" },
+  "광화문·덕수궁": { "AREA_NM": "광화문·덕수궁", "AREA_CD": "POI009", "AREA_CONGEST_LVL": "보통", "AREA_CONGEST_MSG": "사람이 몰려있을 수 있지만 크게 붐비지는 않아요. 도보 이동에 큰 제약이 없어요.", "AREA_PPLTN_MIN": "38000", "AREA_PPLTN_MAX": "40000", "PPLTN_TIME": "2026-10-15 17:40", "source": "mock" },
+  "덕수궁길·정동길": { "AREA_NM": "덕수궁길·정동길", "AREA_CD": "POI064", "AREA_CONGEST_LVL": "여유", "AREA_CONGEST_MSG": "사람이 몰려있을 가능성이 낮고 도보 이동이 자유로워요.", "AREA_PPLTN_MIN": "3000", "AREA_PPLTN_MAX": "3500", "PPLTN_TIME": "2026-10-15 17:40", "source": "mock" },
+  "시의회 앞": { "AREA_NM": "시의회 앞", "AREA_CD": "POI130", "AREA_CONGEST_LVL": "여유", "AREA_CONGEST_MSG": "사람이 몰려있을 가능성이 낮고 도보 이동이 자유로워요.", "AREA_PPLTN_MIN": "2000", "AREA_PPLTN_MAX": "2500", "PPLTN_TIME": "2026-10-15 17:40", "source": "mock" },
+  "광화문광장": { "AREA_NM": "광화문광장", "AREA_CD": "POI088", "AREA_CONGEST_LVL": "약간 붐빔", "AREA_CONGEST_MSG": "사람들이 몰려있을 가능성이 크고 도보 이동 시 부딪힘이 발생할 수 있어요.", "AREA_PPLTN_MIN": "12000", "AREA_PPLTN_MAX": "13000", "PPLTN_TIME": "2026-10-15 17:40", "source": "mock" }
+}

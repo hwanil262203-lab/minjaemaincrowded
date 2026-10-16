@@ -386,7 +386,18 @@ const settings = {
   gpsAssist: true, // 지도 데이터로 위험물 예측
   navEnabled: true, // 도보 경로 안내
   voice: true, // 음성 안내
+  crowdAvoid: 'mid', // 인파 회피 강도: off | weak | mid | strong
+  seoulLive: false, // 서울 실시간 혼잡도(API 키·중계 서버 필요)
+  seoulProxy: '', // 비우면 자동: Netlify 는 /.netlify/functions/seoul, 로컬은 http://127.0.0.1:8002/seoul
+  seoulKey: '', // 서울열린데이터광장 인증키 (사용자 입력, 이 기기에만 저장)
 };
+
+// 인파 회피 설정 → Route.plan 에 넘길 옵션
+function crowdOptions() {
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) || location.protocol === 'file:';
+  const proxy = settings.seoulProxy.trim() || (local ? 'http://127.0.0.1:8002/seoul' : '/.netlify/functions/seoul');
+  return { strength: settings.crowdAvoid, seoul: { enabled: settings.seoulLive, proxy, key: settings.seoulKey.trim() } };
+}
 
 function loadSettings() {
   try {
@@ -704,6 +715,11 @@ function syncSettingsUI() {
   document.getElementById('gpsAssistToggle').checked = settings.gpsAssist;
   document.getElementById('navToggle').checked = settings.navEnabled;
   document.getElementById('voiceToggle').checked = settings.voice;
+  document.querySelectorAll('input[name="crowdAvoid"]').forEach((r) => (r.checked = r.value === settings.crowdAvoid));
+  document.getElementById('seoulLiveToggle').checked = settings.seoulLive;
+  document.getElementById('seoulProxy').value = settings.seoulProxy;
+  document.getElementById('seoulKey').value = settings.seoulKey;
+  document.getElementById('seoulFields').hidden = !settings.seoulLive;
 }
 
 function bindSettingsUI() {
@@ -743,6 +759,43 @@ function bindSettingsUI() {
   document.getElementById('voiceToggle').addEventListener('change', (e) => {
     settings.voice = e.target.checked;
     saveSettings();
+  });
+  document.querySelectorAll('input[name="crowdAvoid"]').forEach((r) =>
+    r.addEventListener('change', () => {
+      if (r.checked) {
+        settings.crowdAvoid = r.value;
+        saveSettings();
+      }
+    })
+  );
+  document.getElementById('seoulLiveToggle').addEventListener('change', (e) => {
+    settings.seoulLive = e.target.checked;
+    document.getElementById('seoulFields').hidden = !settings.seoulLive;
+    saveSettings();
+  });
+  document.getElementById('seoulProxy').addEventListener('change', (e) => {
+    settings.seoulProxy = e.target.value.trim();
+    saveSettings();
+  });
+  document.getElementById('seoulKey').addEventListener('change', (e) => {
+    settings.seoulKey = e.target.value.trim();
+    saveSettings();
+  });
+  document.getElementById('btnSeoulTest').addEventListener('click', async () => {
+    const out = document.getElementById('seoulTestResult');
+    out.textContent = '확인 중...';
+    try {
+      await Crowd.loadAreas();
+      const opts = crowdOptions().seoul;
+      const area = Crowd.state.areas.find((a) => a.name === '광화문·덕수궁') || Crowd.state.areas[0];
+      Crowd.state.cache.delete(area.name);
+      const rec = await Crowd.fetchSeoulLevel(area, opts);
+      out.textContent = rec
+        ? `✓ ${rec.name}: ${rec.level} (${rec.pop[0]}~${rec.pop[1]}명, ${rec.time || '-'}) · ${Crowd.MOCK ? '저장된 테스트 응답(mock)' : '중계: ' + opts.proxy}`
+        : '✗ 응답에 혼잡도가 없습니다';
+    } catch (e) {
+      out.textContent = `✗ 실패: ${e.message} · 중계 서버가 켜져 있는지, 인증키가 맞는지 확인하세요`;
+    }
   });
   document.getElementById('btnVibTest').addEventListener('click', () => {
     if (!testVibration()) log('진동을 지원하지 않거나 차단된 기기입니다.');
@@ -862,7 +915,7 @@ const navUI = {
 let geoStarted = false;
 let selectedDest = null;
 let wakeLock = null;
-const mapState = { map: null, me: null, dest: null, line: null, hazardLayer: null, altLines: [] };
+const mapState = { map: null, me: null, dest: null, line: null, hazardLayer: null, seoulLayer: null, altLines: [] };
 
 function startGeo() {
   if (geoStarted) return;
@@ -890,6 +943,20 @@ function ensureMap() {
 }
 
 const HZ_COLOR = { crosswalk: '#facc15', stairs: '#f97316', pole: '#ef4444' };
+const SEOUL_COLOR = { '여유': '#22c55e', '보통': '#facc15', '약간 붐빔': '#f97316', '붐빔': '#ef4444' };
+
+// 서울 실시간 혼잡도 장소를 지도에 원으로 표시 (반경 300m = 가산 적용 범위)
+function renderSeoulAreas() {
+  if (!mapState.map) return;
+  if (!mapState.seoulLayer) mapState.seoulLayer = L.layerGroup().addTo(mapState.map);
+  mapState.seoulLayer.clearLayers();
+  for (const s of Route.state.seoulLevels || []) {
+    const c = SEOUL_COLOR[s.level] || '#6b7a99';
+    L.circle([s.lat, s.lon], { radius: 300, color: c, fillColor: c, fillOpacity: 0.12, weight: 1.5 })
+      .bindTooltip(`${s.name}: ${s.level} (${s.pop[0]}~${s.pop[1]}명)`)
+      .addTo(mapState.seoulLayer);
+  }
+}
 function renderHazards() {
   if (!mapState.hazardLayer) return;
   mapState.hazardLayer.clearLayers();
@@ -920,7 +987,16 @@ function renderNavStatus() {
   if (r && Route.state.active) {
     const pr = Route.state.lastProgress;
     const sc = r.score || {};
-    parts.push(`<div style="margin-top:6px">경로 <b>${fmtDist(r.distance)}</b> · 약 ${Math.round(r.duration / 60)}분 · 횡단보도 ${sc.cw ?? '-'}곳 · 계단 ${sc.st ?? '-'}곳 · 인파 지표 ${sc.crowdPerKm ?? '-'}/km (대안 ${Route.state.routes.length}개 중 선택)</div>`);
+    parts.push(`<div style="margin-top:6px">경로 <b>${fmtDist(r.distance)}</b> · 약 ${Math.round(r.duration / 60)}분 · 횡단보도 ${sc.cw ?? '-'}곳 · 계단 ${sc.st ?? '-'}곳 · 인파 지수 ${sc.crowdPerKm ?? '-'}/km (대안 ${Route.state.routes.length}개 중 선택)</div>`);
+    const ci = sc.crowdInfo;
+    if (ci) {
+      const kinds = Object.entries(ci.kinds).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${k} ${n}`).join(' · ');
+      parts.push(`<div>인파: ${ci.time.label}(×${ci.time.factor}) · 경로 주변 ${ci.raw ? kinds : '사람 모이는 곳 없음'} · 가산 ${ci.penalty}초</div>`);
+      if (ci.seoul.length) parts.push(`<div>서울 실시간: ${ci.seoul.map((s) => `<span class="pill" style="border-color:${SEOUL_COLOR[s.level] || '#6b7a99'}">${s.name} ${s.level}</span>`).join(' ')}</div>`);
+      else if (settings.seoulLive) parts.push('<div class="muted">서울 실시간: 경로 300m 안에 측정 장소 없음(또는 조회 실패)</div>');
+    }
+    const alts = Route.state.routes.slice(1);
+    if (alts.length) parts.push(`<div class="muted">대안: ${alts.map((a) => `${fmtDist(a.distance)} 점수 ${Math.round(a.score.total)}${a.score.crowdInfo ? ' (인파 ' + a.score.crowdInfo.index + '/km)' : ''}`).join(' · ')} ← 선택 경로 점수 ${Math.round(sc.total)}</div>`);
     if (pr) {
       parts.push(`<div>남은 거리 <b>${fmtDist(pr.remaining)}</b>${pr.offRoute > 30 ? ' · <span style="color:#f97316">경로 이탈 중</span>' : ''}</div>`);
       if (pr.next) parts.push(`<div>다음: ${pr.next.text}</div>`);
@@ -937,6 +1013,7 @@ function renderRoute() {
   mapState.altLines = [];
   if (mapState.line) { mapState.map.removeLayer(mapState.line); mapState.line = null; }
   if (mapState.dest) { mapState.map.removeLayer(mapState.dest); mapState.dest = null; }
+  renderSeoulAreas();
   const r = Route.state.chosen;
   if (!r) return;
   for (const alt of Route.state.routes.slice(1)) {
@@ -986,9 +1063,11 @@ if (navUI.btnGeocode) {
     if (!Geo.state.pos) { log('✗ 현재 위치를 아직 모릅니다'); startGeo(); return; }
     navUI.status.textContent = '경로 탐색 중... (대안 경로와 위험물·인파 데이터 비교)';
     try {
-      await Route.plan(Geo.state.pos, selectedDest, { considerHazards: true });
+      await Route.plan(Geo.state.pos, selectedDest, { considerHazards: true, crowd: crowdOptions() });
       const r = Route.state.chosen;
       log(`✓ 경로 ${fmtDist(r.distance)} · ${Math.round(r.duration / 60)}분 · 점수 ${Math.round(r.score.total)} (대안 ${Route.state.routes.length}개)`);
+      const ci = r.score.crowdInfo;
+      if (ci) log(`인파: 지수 ${ci.index}/km (${ci.time.label} ×${ci.time.factor}) · 가산 ${ci.penalty}초${ci.seoul.length ? ' · 서울 실시간 ' + ci.seoul.map((s) => `${s.name} ${s.level}`).join(', ') : ''}`);
       ensureMap();
       renderRoute();
       renderNavStatus();

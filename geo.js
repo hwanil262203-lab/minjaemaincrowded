@@ -224,9 +224,10 @@ const Geo = (() => {
       `[out:json][timeout:25];(node["shop"]${area};` +
       `node["amenity"~"^(restaurant|cafe|fast_food|bar|pub|marketplace|bus_station|school|university|cinema|theatre)$"]${area};` +
       `node["public_transport"~"^(station|stop_position|platform)$"]${area};` +
-      `node["railway"~"^(station|subway_entrance)$"]${area};);out skel qt 2000;`;
+      `node["railway"~"^(station|subway_entrance)$"]${area};);out qt 2000;`;
     const data = await overpass(q);
-    return (data.elements || []).filter((e) => e.lat != null).map((e) => ({ lat: e.lat, lon: e.lon }));
+    // tags 를 함께 돌려줘 crowd.js 가 종류별(역·시장·학교…) 가중치를 매길 수 있게 한다
+    return (data.elements || []).filter((e) => e.lat != null).map((e) => ({ lat: e.lat, lon: e.lon, tags: e.tags || {} }));
   }
 
   function maybeFetchHazards() {
