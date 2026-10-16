@@ -477,7 +477,7 @@
         <h2>⚙ 설정</h2>
 
         <h3>진동 세기</h3>
-        <p style="font-size: 12px; color: #6b7a99;">웹 진동은 강도 조절이 되지 않아 진동 길이와 반복 간격으로 세기를 흉내 냅니다.</p>
+        <p style="font-size: 12px; color: #6b7a99;">가장 위험한 대상의 위험도(신뢰도 × 장벽 가중치 × 근접도)가 높을수록 진동이 길고 촘촘해지며, 사라질 때까지 계속 울립니다. 웹 진동은 강도 조절이 되지 않아 진동 길이로 세기를 흉내 냅니다.</p>
         <div class="choice" id="vibStrengthChoice">
           <label><input type="radio" name="vibStrength" value="weak" /><span>약</span></label>
           <label><input type="radio" name="vibStrength" value="mid" checked /><span>중</span></label>
@@ -571,7 +571,6 @@
 
     <header>
       <h1>위험지대 감지 + 진동 알림 <span style="font-size: 12px; color: #4ade80; font-weight: normal;">🤖 YOLO 객체 감지</span></h1>
-      <button id="btnSettings" class="secondary" title="설정">⚙ 설정</button>
     </header>
     <main>
       <div class="content">
@@ -580,9 +579,8 @@
           <canvas id="overlay"></canvas>
         </section>
         <aside class="sidebar">
-          <div class="hint">💡 오른쪽 위 동그라미: 초록 ✓ 정상 작동 · 노랑 ! 감지 중단 · 빨강 ! 위험</div>
           <div class="row">
-            <button id="btnCamera">📷 카메라 시작</button>
+            <button id="btnSettings" title="설정">⚙ 설정</button>
             <button id="btnLoadModel" class="secondary">🔄 모델 로드</button>
           </div>
           <div class="row">
@@ -596,7 +594,6 @@
           <div class="row" style="align-items: center;">
             <div class="badge" id="depthStatus">전방 거리: 대기</div>
             <canvas id="depthCanvas" width="84" height="84" style="width: 84px; height: 84px; border-radius: 6px; background: #0d1328;" title="거리 지도 (빨강=가까움, 파랑=멂, 네모=판정 영역)"></canvas>
-            <button id="btnCopyLog" class="secondary" style="padding: 4px 8px; font-size: 12px;">📋 로그 복사</button>
           </div>
           <div class="log" id="log"></div>
         </aside>

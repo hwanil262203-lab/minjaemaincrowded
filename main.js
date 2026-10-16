@@ -58,7 +58,6 @@ const DIR_KO = { left: '왼쪽', center: '정면', right: '오른쪽' };
 const ui = {
   video: document.getElementById('video'),
   overlay: document.getElementById('overlay'),
-  btnCamera: document.getElementById('btnCamera'),
   btnLoadModel: document.getElementById('btnLoadModel'),
   btnStart: document.getElementById('btnStart'),
   btnStop: document.getElementById('btnStop'),
@@ -560,32 +559,61 @@ const VIB_STRENGTH = {
 const FLASH_OPACITY = { light: 0.22, mid: 0.38, strong: 0.55 };
 
 // ============================================
-// 진동: 방향 = 펄스 개수(좌1/정면2/우3), 근접 = 펄스 길이(가까움 150ms / 보통 350ms)
+// 진동: 방향과 무관. 가장 위험한 대상 하나를 골라(assess 가 위험도 순으로 정렬) 그 대상의
+//   가중 위험도(risk = 신뢰도 × 장벽 가중치 × 근접도)만으로 세기를 정하고, 사라질 때까지 계속 울린다.
+//   위험도가 높을수록 진동이 길고 쉬는 시간이 짧다 (웹 진동 API 는 강도 조절이 없어 이렇게 흉내 낸다).
 // ============================================
-const vib = { key: null, t: 0 };
+const vib = { key: null, t: 0, cycleMs: 0 };
 const canVibrate = 'vibrate' in navigator;
 
-function vibrationPattern(dir, near, strength = settings.vibStrength) {
+// risk: 0 ~ 1 (예: 계단 가중치 1.0 × 신뢰도 0.8 × 근접 1.0 = 0.8). 한 사이클 [울림, 쉼] 을 이어 붙여 약 1.5초 패턴.
+const RISK_FULL = 0.7; // 이 위험도 이상이면 최대 세기
+function vibrationPattern(risk, strength = settings.vibStrength) {
   const s = VIB_STRENGTH[strength] || VIB_STRENGTH.mid;
-  const pulses = dir === 'left' ? 1 : dir === 'center' ? 2 : 3;
-  const len = Math.round((near ? 150 : 350) * s.scale);
-  const gap = 120;
+  const level = Math.max(0, Math.min(1, risk / RISK_FULL));
+  const on = Math.round((180 + 320 * level) * s.scale); // 180~500ms
+  const off = Math.round(320 - 220 * level); // 320~100ms
   const pattern = [];
-  for (let i = 0; i < pulses; i++) {
-    pattern.push(len);
-    if (i < pulses - 1) pattern.push(gap);
+  let total = 0;
+  while (total < 1500) {
+    pattern.push(on, off);
+    total += on + off;
   }
   return pattern;
 }
 
+// 사용자가 원(인디케이터)을 눌러 "이 대상은 그만 울려" 로 만든 상태
+// label: 무음 처리한 위험물 종류, lastSeen: 마지막으로 그 종류가 확정 감지된 시각
+const mute = { label: null, lastSeen: 0 };
+const MUTE_CLEAR_MS = 1500; // 이 시간 동안 안 보이면 화면 밖으로 나간 것으로 보고 무음 해제
+
+function muteCurrent(label) {
+  mute.label = label;
+  mute.lastSeen = performance.now();
+  stopVibration();
+  log(`🔇 ${classInfo(label).ko} 진동 끔 — 화면에서 사라졌다가 다시 나타나면 다시 울립니다`);
+}
+
+function clearMute(why) {
+  if (!mute.label) return;
+  log(`🔔 ${classInfo(mute.label).ko} 진동 다시 켬 (${why})`);
+  mute.label = null;
+}
+
 function vibrateFor(det) {
-  const key = `${det.label}|${det.dir}|${det.near}`;
+  if (mute.label === det.label) {
+    mute.lastSeen = performance.now();
+    return; // 같은 대상이 계속 보이는 동안은 조용히
+  }
+  if (mute.label) clearMute('다른 위험물 감지'); // 다른 종류가 나타나면 무음은 끝
+  const key = `${det.label}|${Math.round(det.risk * 10)}`;
   const now = performance.now();
-  const repeatMs = (VIB_STRENGTH[settings.vibStrength] || VIB_STRENGTH.mid).repeatMs;
-  if (key !== vib.key || now - vib.t > repeatMs) {
-    if (canVibrate) navigator.vibrate(vibrationPattern(det.dir, det.near));
+  if (key !== vib.key || now - vib.t > vib.cycleMs) {
+    const pattern = vibrationPattern(det.risk);
+    if (canVibrate) navigator.vibrate(pattern);
     vib.key = key;
     vib.t = now;
+    vib.cycleMs = pattern.reduce((a, b) => a + b, 0) - 50; // 끊김 없이 이어서 울리도록 조금 일찍 다시 보냄
   }
   setFlash(true);
 }
@@ -595,6 +623,7 @@ function stopVibration() {
   vib.key = null;
   vib.t = 0;
   setFlash(false);
+  if (mute.label && performance.now() - mute.lastSeen > MUTE_CLEAR_MS) clearMute('화면에서 사라짐');
 }
 
 // 화면 깜빡임 (진동 모드/무음 대비)
@@ -612,8 +641,8 @@ function setFlash(on) {
 
 function testVibration() {
   if (!canVibrate) return false;
-  // 정면·가까움 패턴 (2회) 으로 체감
-  return navigator.vibrate(vibrationPattern('center', true));
+  // 위험도 0.6 (가까운 계단을 60% 신뢰도로 본 정도) 세기로 1.5초 체감
+  return navigator.vibrate(vibrationPattern(0.6));
 }
 
 function testFlash() {
@@ -679,7 +708,7 @@ function updateDetectionList(dets, best) {
 const INDICATOR = {
   ok: { cls: '', text: '✓', title: '정상 작동 중 (드래그하여 이동 가능)' },
   warn: { cls: 'warn', text: '!', title: '비정상: 감지가 동작하지 않습니다 (드래그하여 이동 가능)' },
-  danger: { cls: 'danger', text: '!', title: '위험 감지됨! (드래그하여 이동 가능)' },
+  danger: { cls: 'danger', text: '!', title: '위험 감지됨! 누르면 이 대상이 사라질 때까지 진동을 끕니다 (드래그하여 이동 가능)' },
 };
 let indicatorState = null;
 
@@ -725,7 +754,7 @@ async function inferenceLoop() {
     return;
   }
   if (!(webcamStream || testImage)) {
-    log('✗ 카메라가 준비되지 않았습니다. 📷 카메라 시작을 눌러 주세요.');
+    log('✗ 카메라가 준비되지 않았습니다. 카메라 권한을 확인한 뒤 페이지를 새로고침해 주세요.');
     return;
   }
   if (isRunning) return;
@@ -899,7 +928,6 @@ setInterval(() => {
   }
 }, 2000);
 
-ui.btnCamera.addEventListener('click', openCamera);
 ui.btnLoadModel.addEventListener('click', () => (session ? loadModel({ force: true }) : ensureModel()));
 document.getElementById('btnErrorReload').addEventListener('click', () => location.reload());
 ui.btnStart.addEventListener('click', inferenceLoop);
@@ -914,10 +942,15 @@ let dragStartY = 0;
 let indicatorStartX = 0;
 let indicatorStartY = 0;
 
+let dragStartT = 0;
+let dragMoved = 0;
+
 function beginDrag(clientX, clientY) {
   isDragging = true;
   dragStartX = clientX;
   dragStartY = clientY;
+  dragStartT = performance.now();
+  dragMoved = 0;
   const rect = ui.floatingIndicator.getBoundingClientRect();
   indicatorStartX = rect.left;
   indicatorStartY = rect.top;
@@ -926,6 +959,7 @@ function beginDrag(clientX, clientY) {
 
 function moveDrag(clientX, clientY) {
   if (!isDragging) return;
+  dragMoved = Math.max(dragMoved, Math.hypot(clientX - dragStartX, clientY - dragStartY));
   ui.floatingIndicator.style.left = indicatorStartX + (clientX - dragStartX) + 'px';
   ui.floatingIndicator.style.top = indicatorStartY + (clientY - dragStartY) + 'px';
   ui.floatingIndicator.style.right = 'auto';
@@ -935,6 +969,15 @@ function endDrag() {
   if (!isDragging) return;
   isDragging = false;
   ui.floatingIndicator.classList.remove('dragging');
+  // 거의 움직이지 않고 짧게 뗐으면 '탭' → 위험 감지 중이면 이 대상 무음
+  if (dragMoved < 8 && performance.now() - dragStartT < 600) onIndicatorTap();
+}
+
+function onIndicatorTap() {
+  const label = hysteresisState.lastLabel;
+  if (!health.danger || !label) return; // 위험 상태가 아닐 때는 아무 일도 없음
+  if (mute.label === label) return; // 이미 무음이면 그대로 (수동 해제 없음, 대상이 사라져야 풀림)
+  muteCurrent(label);
 }
 
 ui.floatingIndicator.addEventListener('mousedown', (e) => {
@@ -1065,15 +1108,6 @@ function bindSettingsUI() {
     saveSettings();
     log(`GPU 가속 ${settings.useWebGpu ? '사용' : '사용 안 함'} — 🔄 모델 다시 로드 를 누르면 적용됩니다`);
   });
-  document.getElementById('btnCopyLog').addEventListener('click', async () => {
-    const text = [navigator.userAgent, ui.engine.textContent, ui.status.textContent, '', ui.log.textContent].join('\n');
-    try {
-      await navigator.clipboard.writeText(text);
-      log('📋 로그를 복사했습니다. 메시지로 붙여 넣어 보내 주세요.');
-    } catch (_) {
-      window.prompt('아래 내용을 길게 눌러 복사하세요', text);
-    }
-  });
   document.getElementById('btnVibTest').addEventListener('click', () => {
     if (!testVibration()) log('진동을 지원하지 않거나 차단된 기기입니다.');
   });
@@ -1129,7 +1163,7 @@ async function startApp() {
     log('✗ 모델이 없어 시작하지 못했습니다. 🔄 모델 로드 버튼을 눌러 주세요.');
     setModelButton('retry');
   } else {
-    log('✗ 카메라가 준비되지 않았습니다. 📷 카메라 시작을 눌러 주세요.');
+    log('✗ 카메라가 준비되지 않았습니다. 카메라 권한을 확인한 뒤 페이지를 새로고침해 주세요.');
   }
 }
 
