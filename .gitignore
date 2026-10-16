@@ -41,3 +41,7 @@ build/
 datasets/
 
 # 학습 산출물 best.onnx 는 커밋 대상 (시험용 yolov10n.onnx 도 포함)
+
+# Python cache
+__pycache__/
+*.pyc

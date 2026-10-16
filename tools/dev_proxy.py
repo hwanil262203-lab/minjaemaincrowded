@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """로컬 개발용 서울 실시간 도시데이터 중계 서버 (netlify/functions/seoul.js 와 같은 동작).
 실행:  py -3 tools/dev_proxy.py            → http://127.0.0.1:8002/seoul?area=광화문·덕수궁&key=인증키
-환경변수 SEOUL_API_KEY 로 기본 키 지정 가능. 키가 없으면 'sample'(광화문·덕수궁만 동작).
+환경변수 SEOUL_API_KEY 또는 저장소 루트의 .env 파일(SEOUL_API_KEY=...)로 기본 키 지정. 키가 없으면 'sample'(광화문·덕수궁만 동작).
 """
 import json, os, sys, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE = "http://openapi.seoul.go.kr:8088"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8002
+
+# 저장소 루트의 .env (git 에 올라가지 않음) 에서 SEOUL_API_KEY=... 를 읽는다
+_env = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+if os.path.exists(_env):
+    for _line in open(_env, encoding="utf-8"):
+        if "=" in _line and not _line.strip().startswith("#"):
+            _k, _v = _line.strip().split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 
 def get_json(url):
