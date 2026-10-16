@@ -479,7 +479,11 @@ function assess(dets, vw, vh, minProximity) {
     const info = classInfo(det.label);
     det.ko = info.ko;
     det.color = info.color;
-    det.prox = (det.y2 - det.y1) / vh; // 박스 높이 비율 = 근접도 (0~1)
+    // 근접도: 박스의 '아랫변 위치'를 주로 쓴다. 바닥에 놓인 물체는 가까울수록 화면 아래쪽에 밑이 걸리므로
+    // 물체가 원래 커서(버스, 굵은 기둥) 멀리서도 박스가 크게 잡히는 경우를 걸러낸다. 박스 높이는 보조로만 반영.
+    det.proxH = (det.y2 - det.y1) / vh; // 박스 높이 비율 (0~1)
+    det.proxB = Math.max(0, Math.min(1, (det.y2 / vh - 0.5) / 0.5)); // 아랫변이 화면 중간(0)~맨 아래(1)
+    det.prox = det.proxB * (0.6 + 0.4 * det.proxH); // 0~1. 멀리 있는 큰 물체: 아랫변이 위쪽 → 작게
     const cx = (det.x1 + det.x2) / 2 / vw;
     det.dir = cx < 0.35 ? 'left' : cx > 0.65 ? 'right' : 'center';
     det.near = det.prox >= 0.5;
